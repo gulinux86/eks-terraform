@@ -5,4 +5,3 @@ repos:
       - id: terraform_fmt
     args:
      - --args=-recursive
-     
