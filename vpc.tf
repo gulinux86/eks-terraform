@@ -1,9 +1,13 @@
 resource "aws_vpc" "eks_vpc" {
-  cidr_block           = "10.0.0.0/16"
+  cidr_block           = var.cidr_block
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags = {
-    Name = "Eks Cluster-VPC"
-  }
+  tags = merge(
+    local.tags,
+    {
+      Name = "eks_vpc"
+    }
+  )
 }
+
 
