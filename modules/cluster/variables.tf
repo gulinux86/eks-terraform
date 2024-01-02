@@ -1,8 +1,3 @@
-variable "cidr_block" {
-  type        = string
-  description = "Networking CIDER block to be used for the VPC"
-}
-
 variable "project_name" {
   type        = string
   description = "Project name to be used to name the resouces (Name tag)"
@@ -11,4 +6,14 @@ variable "project_name" {
 variable "tags" {
   type        = map(any)
   description = "Tags to be added to AWS resources"
+}
+
+variable "public_subnet_1a" {
+  type        = string
+  description = "Subnet to create EKS cluster AZ 1a"
+}
+
+variable "public_subnet_1b" {
+  type        = string
+  description = "Subnet to create EKS cluster AZ 1b"
 }
