@@ -50,7 +50,7 @@ resource "aws_instance" "bastion" {
     set -euo pipefail
 
     # kubectl
-    curl -sLO "https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl"
+    curl -sLO "https://dl.k8s.io/release/v1.34.0/bin/linux/amd64/kubectl"
     install -m 0755 kubectl /usr/local/bin/kubectl
     rm -f kubectl
 
