@@ -9,6 +9,9 @@ desired_size   = 2
 min_size       = 2
 max_size       = 4
 
+# Set to the prod account's CI deploy role ARN once that account exists.
+cluster_admin_role_arns = ["arn:aws:iam::000000000000:role/github-actions-eks-terraform"]
+
 tags = {
   Project     = "eks"
   Environment = "prod"
