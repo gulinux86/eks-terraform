@@ -35,6 +35,12 @@ variable "cluster_log_types" {
   default     = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
 }
 
+variable "admin_role_arns" {
+  type        = list(string)
+  description = "IAM role/user ARNs granted cluster-admin via EKS Access Entries (typically the CI/CD deploy role). Required because AWS provider v6 does not bootstrap creator admin permissions by default."
+  default     = []
+}
+
 variable "endpoint_public_access" {
   type        = bool
   description = "Expose the EKS API server publicly. Required when Terraform runs from outside the VPC (e.g. GitHub-hosted runners). Private access stays enabled regardless."

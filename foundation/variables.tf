@@ -54,6 +54,12 @@ variable "endpoint_public_access" {
   default     = true
 }
 
+variable "cluster_admin_role_arns" {
+  type        = list(string)
+  description = "IAM principals granted EKS cluster-admin (typically the CI/CD deploy role that runs Terraform). Needed so the workload layer's kubernetes/helm providers are authorized."
+  default     = []
+}
+
 variable "public_access_cidrs" {
   type        = list(string)
   description = "CIDRs allowed to reach the public API endpoint. Tighten this per environment (e.g. office/CI egress ranges)."
