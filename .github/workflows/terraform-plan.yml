@@ -1,0 +1,157 @@
+name: terraform-plan
+
+# Plan as read-only feedback:
+#   - automatically on PRs to develop/main (env inferred from the base branch),
+#     posted as a PR comment so you review the diff before deploying;
+#   - on demand via workflow_dispatch, where you pick the environment.
+# Deploys are separate and manual (see terraform-deploy.yml).
+on:
+  pull_request:
+    branches: [master, develop, main]
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+      - "**.hcl"
+      - "**.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to plan"
+        required: true
+        type: choice
+        options: [hml, prod]
+
+permissions:
+  contents: read
+  id-token: write # OIDC
+  pull-requests: write # post the plan comment (PR runs only)
+
+concurrency:
+  group: tf-plan-${{ github.event.pull_request.number || github.event.inputs.environment }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        layer: [foundation, workload]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Manual dispatch → use the chosen environment; PR → infer from base branch.
+      - name: Select environment + role
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENV="${{ github.event.inputs.environment }}"
+          elif [ "${{ github.base_ref }}" = "main" ]; then
+            ENV="prod"
+          else
+            ENV="hml"
+          fi
+          echo "ENV_NAME=$ENV" >> "$GITHUB_ENV"
+          if [ "$ENV" = "prod" ]; then
+            echo "AWS_ROLE_ARN=${{ secrets.PROD_AWS_ROLE_ARN }}" >> "$GITHUB_ENV"
+          else
+            echo "AWS_ROLE_ARN=${{ secrets.HML_AWS_ROLE_ARN }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "~> 1.10"
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform -chdir=${{ matrix.layer }} init -backend-config=environments/${{ env.ENV_NAME }}/backend.hcl
+
+      - name: Terraform validate
+        run: terraform -chdir=${{ matrix.layer }} validate
+
+      - name: Terraform plan
+        id: plan
+        run: |
+          set +e
+
+          # Greenfield guard: the workload layer reads foundation's remote state.
+          # If foundation has never been applied for this env, its state object
+          # does not exist yet — skip the workload plan instead of failing.
+          if [ "${{ matrix.layer }}" = "workload" ]; then
+            HCL="foundation/environments/${ENV_NAME}/backend.hcl"
+            BUCKET=$(sed -nE 's/^[[:space:]]*bucket[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$HCL")
+            KEY=$(sed -nE 's/^[[:space:]]*key[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$HCL")
+            if ! aws s3api head-object --bucket "$BUCKET" --key "$KEY" >/dev/null 2>&1; then
+              {
+                echo "Skipped: foundation remote state not found at s3://$BUCKET/$KEY"
+                echo
+                echo "The workload layer reads the foundation layer's remote state, which does"
+                echo "not exist yet. Apply the foundation layer for the '${ENV_NAME}' environment"
+                echo "first (terraform-deploy → layer: foundation), then re-run this plan."
+              } > /tmp/plan_output.txt
+              echo "skipped=true" >> "$GITHUB_OUTPUT"
+              echo "exitcode=0" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          terraform -chdir=${{ matrix.layer }} plan -no-color -input=false \
+            -var-file=environments/${{ env.ENV_NAME }}/terraform.tfvars \
+            > /tmp/plan_output.txt 2>&1
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
+
+      # On PRs: post/update the plan as a comment.
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const fs = require('fs');
+            const layer = '${{ matrix.layer }}';
+            const code = '${{ steps.plan.outputs.exitcode }}';
+            const skipped = '${{ steps.plan.outputs.skipped }}' === 'true';
+            const tag = `<!-- tf-plan-bot-${layer} -->`;
+            let plan = fs.readFileSync('/tmp/plan_output.txt', 'utf8');
+            // exit 0 = no changes, 2 = changes (both fine), 1 = error.
+            const status = skipped ? '⏭️' : (code !== '1' ? '✅' : '❌');
+            if (plan.length > 60000) plan = plan.slice(0, 60000) + '\n... (truncated)';
+            const body = `${tag}\n## ${status} Terraform Plan — \`${layer}\` (${process.env.ENV_NAME})\n\n<details><summary>Show plan</summary>\n\n\`\`\`\n${plan}\n\`\`\`\n\n</details>`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(tag));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }
+
+      # On manual dispatch: just surface the plan in the job log.
+      - name: Show plan (dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: cat /tmp/plan_output.txt
+
+      - name: Fail on plan error
+        if: steps.plan.outputs.exitcode == '1'
+        run: |
+          echo "terraform plan failed:" >&2
+          cat /tmp/plan_output.txt >&2
+          exit 1

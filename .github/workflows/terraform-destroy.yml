@@ -1,0 +1,91 @@
+name: terraform-destroy
+
+# Manual, controlled teardown: you pick the environment and layer when you run it.
+# Destructive — gated by a typed confirmation and, for PROD, by the `prod` GitHub
+# Environment (required reviewer). Shares the `terraform-<env>` concurrency group
+# with terraform-deploy so a destroy can never overlap an apply for the same env.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [hml, prod]
+      layer:
+        description: "Which layer(s) to destroy"
+        required: true
+        default: both
+        type: choice
+        options: [foundation, workload, both]
+      confirm:
+        description: "Type the environment name (hml/prod) to confirm destroy"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write # OIDC
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    # Ties to the GitHub Environment: `prod` carries the required reviewer, so a
+    # prod run pauses for approval before this job starts.
+    environment: ${{ github.event.inputs.environment }}
+    concurrency:
+      group: terraform-${{ github.event.inputs.environment }}
+      cancel-in-progress: false
+    env:
+      ENVIRONMENT: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Confirm destroy
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "$ENVIRONMENT" ]; then
+            echo "Confirmation '${{ github.event.inputs.confirm }}' does not match environment '$ENVIRONMENT'. Aborting." >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Select AWS role
+        run: |
+          if [ "$ENVIRONMENT" = "prod" ]; then
+            echo "AWS_ROLE_ARN=${{ secrets.PROD_AWS_ROLE_ARN }}" >> "$GITHUB_ENV"
+          else
+            echo "AWS_ROLE_ARN=${{ secrets.HML_AWS_ROLE_ARN }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "~> 1.10"
+
+      - name: Resolve layers
+        run: |
+          # "both" must destroy workload BEFORE foundation (reverse of apply):
+          # workload depends on foundation's state and on a live cluster endpoint.
+          if [ "${{ github.event.inputs.layer }}" = "both" ]; then
+            echo "LAYERS=workload foundation" >> "$GITHUB_ENV"
+          else
+            echo "LAYERS=${{ github.event.inputs.layer }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Destroy
+        run: |
+          set -euo pipefail
+          for L in $LAYERS; do
+            echo "::group::terraform destroy $L ($ENVIRONMENT)"
+            terraform -chdir="$L" init -input=false \
+              -backend-config="environments/${ENVIRONMENT}/backend.hcl"
+            terraform -chdir="$L" destroy -auto-approve -input=false \
+              -var-file="environments/${ENVIRONMENT}/terraform.tfvars"
+            echo "::endgroup::"
+          done
