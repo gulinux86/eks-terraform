@@ -15,6 +15,7 @@ module "eks_cluster" {
   kubernetes_version     = var.kubernetes_version
   endpoint_public_access = var.endpoint_public_access
   public_access_cidrs    = var.public_access_cidrs
+  admin_role_arns        = var.cluster_admin_role_arns
 }
 
 module "eks_managed-node-group" {
