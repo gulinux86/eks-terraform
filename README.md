@@ -1,47 +1,99 @@
 # eks-terraform
-Deploying Eks Cluster 
 
-<!-- BEGIN_TF_DOCS -->
-## Requirements
+Provisioning of a **private Amazon EKS** cluster with Terraform, organized into
+two independent state layers (`foundation` and `workload`) and shipped with a
+GitHub Actions CI/CD pipeline.
 
-| Name | Version |
-|------|---------|
-| <a name="requirement_aws"></a> [aws](#requirement\_aws) | 5.15.0 |
-| <a name="requirement_helm"></a> [helm](#requirement\_helm) | 2.12.1 |
-| <a name="requirement_kubernetes"></a> [kubernetes](#requirement\_kubernetes) | 2.25.2 |
+> **Design & trade-offs:** see [ARCHITECTURE.md](./ARCHITECTURE.md).
+> Per-module/per-layer inputs and outputs are documented in each directory's
+> `README.md` (generated with [terraform-docs](https://terraform-docs.io)).
 
-## Providers
+## Architecture at a glance
 
-No providers.
+```
+                         ┌─────────────────────────────────────────────┐
+                         │                    VPC                       │
+                         │   10.0.0.0/16 (hml)  /  10.1.0.0/16 (prod)   │
+                         │                                              │
+   ┌──────────┐  IGW     │  ┌─────────── public ─────────────┐         │
+   │ Internet │──────────┼─▶│  NAT-1a        NAT-1b           │         │
+   └──────────┘          │  └────────────────────────────────┘         │
+                         │  ┌─────────── private ────────────┐         │
+                         │  │  EKS API (private ENIs)         │         │
+                         │  │  Managed node group (AL2023)    │         │
+                         │  │  Bastion (access via SSM)       │         │
+                         │  │  VPC interface/gateway endpoints│         │
+                         │  └────────────────────────────────┘         │
+                         └─────────────────────────────────────────────┘
 
-## Modules
+  foundation/  ──(terraform_remote_state)──▶  workload/
+  network, EKS, KMS, OIDC, nodes, bastion       AWS Load Balancer Controller (IRSA + Helm)
+```
 
-| Name | Source | Version |
-|------|--------|---------|
-| <a name="module_eks_aws_load_balancer_controller"></a> [eks\_aws\_load\_balancer\_controller](#module\_eks\_aws\_load\_balancer\_controller) | ./modules/aws-load-balancer-controller | n/a |
-| <a name="module_eks_cluster"></a> [eks\_cluster](#module\_eks\_cluster) | ./modules/cluster | n/a |
-| <a name="module_eks_managed-node-group"></a> [eks\_managed-node-group](#module\_eks\_managed-node-group) | ./modules/managed-node-group | n/a |
-| <a name="module_eks_network"></a> [eks\_network](#module\_eks\_network) | ./modules/network | n/a |
+## Layers
 
-## Resources
+| Layer        | Responsibility                                                                   | State                                |
+|--------------|----------------------------------------------------------------------------------|--------------------------------------|
+| `foundation` | VPC, subnets, NAT/IGW, EKS, KMS, OIDC, managed node group, bastion, VPC endpoints | `foundation/<env>/terraform.tfstate` |
+| `workload`   | Cluster add-ons — today the AWS Load Balancer Controller (IRSA + Helm)            | `workload/<env>/terraform.tfstate`   |
 
-No resources.
+The `workload` layer reads `foundation` outputs through `terraform_remote_state`,
+so **`foundation` is always applied first**.
 
-## Inputs
+## Prerequisites
 
-| Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
-| <a name="input_cidr_block"></a> [cidr\_block](#input\_cidr\_block) | Networking CIDER block to be used for the VPC | `string` | n/a | yes |
-| <a name="input_project_name"></a> [project\_name](#input\_project\_name) | Project name to be used to name the resouces (Name tag) | `string` | n/a | yes |
-| <a name="input_region"></a> [region](#input\_region) | AWS region to create the resources | `string` | n/a | yes |
-| <a name="input_tags"></a> [tags](#input\_tags) | A map of tags to add to all AWS resources | `map(any)` | n/a | yes |
+- Terraform `~> 1.10`
+- AWS CLI configured
+- An S3 bucket for state (see `environments/<env>/backend.hcl`)
 
-## Outputs
+## Usage
 
-| Name | Description |
-|------|-------------|
-| <a name="output_ca"></a> [ca](#output\_ca) | n/a |
-| <a name="output_endpoint"></a> [endpoint](#output\_endpoint) | n/a |
-| <a name="output_oidc"></a> [oidc](#output\_oidc) | n/a |
-| <a name="output_subnet_pub_1a"></a> [subnet\_pub\_1a](#output\_subnet\_pub\_1a) | n/a |
-<!-- END_TF_DOCS -->
+Each layer uses a partial backend: `bucket`/`key`/`region` come from
+`environments/<env>/backend.hcl`.
+
+```bash
+# 1) foundation
+terraform -chdir=foundation init  -backend-config=environments/hml/backend.hcl
+terraform -chdir=foundation plan  -var-file=environments/hml/terraform.tfvars
+terraform -chdir=foundation apply -var-file=environments/hml/terraform.tfvars
+
+# 2) workload (after foundation exists)
+terraform -chdir=workload init  -backend-config=environments/hml/backend.hcl
+terraform -chdir=workload plan  -var-file=environments/hml/terraform.tfvars
+terraform -chdir=workload apply -var-file=environments/hml/terraform.tfvars
+```
+
+Swap `hml` for `prod` for the production environment.
+
+### Cluster access via the bastion
+
+```bash
+aws ssm start-session --target <bastion_instance_id>
+# inside the session: kubectl/helm are already configured via user_data
+kubectl get nodes
+```
+
+## CI/CD (GitHub Actions)
+
+| Workflow               | Trigger                                        | What it does                                                                       |
+|------------------------|------------------------------------------------|------------------------------------------------------------------------------------|
+| `terraform-plan.yml`   | PR to `develop`/`main`, plus `workflow_dispatch` | `fmt` + `validate` + `plan` (matrix over `foundation`/`workload`); comments the plan on the PR |
+| `terraform-deploy.yml` | `workflow_dispatch` (choose env and layer)     | `plan -out` + `apply` of the saved plan; `prod` requires reviewer approval         |
+
+- AWS authentication via **OIDC** (no static keys).
+- Environment inferred from the base branch (`main` → prod, otherwise → hml) or chosen on dispatch.
+- `prod` is protected by a GitHub Environment (required reviewer).
+
+## Repository layout
+
+```
+foundation/
+  main.tf  provider.tf  variables.tf  backend.tf  outputs.tf  README.md
+  environments/{hml,prod}/{terraform.tfvars,backend.hcl}
+  modules/{network,cluster,managed-node-group,bastion,vpc-endpoints}/
+workload/
+  main.tf  provider.tf  variables.tf  backend.tf  README.md
+  environments/{hml,prod}/{terraform.tfvars,backend.hcl}
+  modules/aws-load-balancer-controller/
+ARCHITECTURE.md
+```
