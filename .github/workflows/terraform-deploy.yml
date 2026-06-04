@@ -1,0 +1,81 @@
+name: terraform-deploy
+
+# Manual, controlled deploys: you pick the environment and layer when you run it.
+# Nothing applies automatically on merge. PROD is still gated by the `prod`
+# GitHub Environment (required reviewer). Apply always uses a saved plan.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [hml, prod]
+      layer:
+        description: "Which layer(s) to apply"
+        required: true
+        default: both
+        type: choice
+        options: [foundation, workload, both]
+
+permissions:
+  contents: read
+  id-token: write # OIDC
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Ties to the GitHub Environment: `prod` carries the required reviewer, so a
+    # prod run pauses for approval before this job starts.
+    environment: ${{ github.event.inputs.environment }}
+    # Never run two applies for the same env at once; never cancel one mid-apply.
+    concurrency:
+      group: terraform-${{ github.event.inputs.environment }}
+      cancel-in-progress: false
+    env:
+      ENVIRONMENT: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Select AWS role
+        run: |
+          if [ "$ENVIRONMENT" = "prod" ]; then
+            echo "AWS_ROLE_ARN=${{ secrets.PROD_AWS_ROLE_ARN }}" >> "$GITHUB_ENV"
+          else
+            echo "AWS_ROLE_ARN=${{ secrets.HML_AWS_ROLE_ARN }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "~> 1.10"
+
+      - name: Resolve layers
+        run: |
+          # "both" must apply foundation BEFORE workload (workload reads its state).
+          if [ "${{ github.event.inputs.layer }}" = "both" ]; then
+            echo "LAYERS=foundation workload" >> "$GITHUB_ENV"
+          else
+            echo "LAYERS=${{ github.event.inputs.layer }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Apply (saved plan per layer)
+        run: |
+          set -euo pipefail
+          for L in $LAYERS; do
+            echo "::group::terraform $L ($ENVIRONMENT)"
+            terraform -chdir="$L" init -input=false \
+              -backend-config="environments/${ENVIRONMENT}/backend.hcl"
+            # plan -out then apply the saved plan — never re-plan at apply time.
+            terraform -chdir="$L" plan -input=false -out=tfplan \
+              -var-file="environments/${ENVIRONMENT}/terraform.tfvars"
+            terraform -chdir="$L" apply -input=false -auto-approve tfplan
+            echo "::endgroup::"
+          done
