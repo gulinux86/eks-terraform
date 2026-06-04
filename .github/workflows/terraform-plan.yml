@@ -83,20 +83,23 @@ jobs:
         run: |
           set +e
 
-          # Greenfield guard: the workload layer reads foundation's remote state.
-          # If foundation has never been applied for this env, its state object
-          # does not exist yet — skip the workload plan instead of failing.
+          # Greenfield/torn-down guard: the workload layer reads foundation's
+          # remote state. Skip the workload plan when foundation has no outputs
+          # for this env — either it was never applied, or it was destroyed (the
+          # state object still exists but is empty). Checking outputs (not just
+          # the object's existence) covers both cases.
           if [ "${{ matrix.layer }}" = "workload" ]; then
             HCL="foundation/environments/${ENV_NAME}/backend.hcl"
             BUCKET=$(sed -nE 's/^[[:space:]]*bucket[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$HCL")
             KEY=$(sed -nE 's/^[[:space:]]*key[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$HCL")
-            if ! aws s3api head-object --bucket "$BUCKET" --key "$KEY" >/dev/null 2>&1; then
+            FOUNDATION_OUTPUTS=$(aws s3 cp "s3://$BUCKET/$KEY" - 2>/dev/null | jq -r '.outputs | length' 2>/dev/null || echo 0)
+            if [ "${FOUNDATION_OUTPUTS:-0}" = "0" ]; then
               {
-                echo "Skipped: foundation remote state not found at s3://$BUCKET/$KEY"
+                echo "Skipped: foundation layer has no outputs for '${ENV_NAME}' yet."
                 echo
-                echo "The workload layer reads the foundation layer's remote state, which does"
-                echo "not exist yet. Apply the foundation layer for the '${ENV_NAME}' environment"
-                echo "first (terraform-deploy → layer: foundation), then re-run this plan."
+                echo "The workload layer reads the foundation layer's remote state, which is"
+                echo "either not applied yet or was destroyed (empty state). Apply the foundation"
+                echo "layer for '${ENV_NAME}' (terraform-deploy → layer: foundation), then re-run."
               } > /tmp/plan_output.txt
               echo "skipped=true" >> "$GITHUB_OUTPUT"
               echo "exitcode=0" >> "$GITHUB_OUTPUT"

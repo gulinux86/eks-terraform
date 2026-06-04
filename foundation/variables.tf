@@ -18,6 +18,36 @@ variable "tags" {
   description = "A map of tags to add to all AWS resources"
 }
 
+variable "kubernetes_version" {
+  type        = string
+  description = "Kubernetes version for the EKS cluster. Pin a version in standard support (avoid extended-support versions)."
+  default     = "1.34"
+}
+
+variable "instance_types" {
+  type        = list(string)
+  description = "EC2 instance types for the managed node group. On a new AWS account under the Free Plan, only free-tier-eligible types launch (e.g. t3.small, t3.micro, c7i-flex.large, m7i-flex.large)."
+  default     = ["t3.small"]
+}
+
+variable "desired_size" {
+  type        = number
+  description = "Desired number of nodes"
+  default     = 1
+}
+
+variable "min_size" {
+  type        = number
+  description = "Minimum number of nodes"
+  default     = 1
+}
+
+variable "max_size" {
+  type        = number
+  description = "Maximum number of nodes"
+  default     = 2
+}
+
 variable "endpoint_public_access" {
   type        = bool
   description = "Expose the EKS API server publicly so Terraform (GitHub-hosted runners) and operators can reach it. Private access remains enabled."
