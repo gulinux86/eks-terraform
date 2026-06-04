@@ -12,6 +12,7 @@ module "eks_cluster" {
   private_subnet_1a      = module.eks_network.subnet_private_1a
   private_subnet_1b      = module.eks_network.subnet_private_1b
   vpc_cidr               = module.eks_network.vpc_cidr
+  kubernetes_version     = var.kubernetes_version
   endpoint_public_access = var.endpoint_public_access
   public_access_cidrs    = var.public_access_cidrs
 }
@@ -23,6 +24,10 @@ module "eks_managed-node-group" {
   subnet_private_1a = module.eks_network.subnet_private_1a
   subnet_private_1b = module.eks_network.subnet_private_1b
   tags              = var.tags
+  instance_types    = var.instance_types
+  desired_size      = var.desired_size
+  min_size          = var.min_size
+  max_size          = var.max_size
 }
 
 module "bastion" {
