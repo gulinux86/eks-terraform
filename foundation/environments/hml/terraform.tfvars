@@ -10,6 +10,10 @@ desired_size   = 1
 min_size       = 1
 max_size       = 2
 
+# IAM principals granted cluster-admin (the CI deploy role that runs Terraform,
+# so the workload layer's kubernetes/helm providers are authorized).
+cluster_admin_role_arns = ["arn:aws:iam::889384902110:role/github-actions-eks-terraform"]
+
 tags = {
   Project     = "eks"
   Environment = "hml"
