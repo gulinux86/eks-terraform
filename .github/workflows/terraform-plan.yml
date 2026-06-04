@@ -82,6 +82,28 @@ jobs:
         id: plan
         run: |
           set +e
+
+          # Greenfield guard: the workload layer reads foundation's remote state.
+          # If foundation has never been applied for this env, its state object
+          # does not exist yet — skip the workload plan instead of failing.
+          if [ "${{ matrix.layer }}" = "workload" ]; then
+            HCL="foundation/environments/${ENV_NAME}/backend.hcl"
+            BUCKET=$(sed -nE 's/^[[:space:]]*bucket[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$HCL")
+            KEY=$(sed -nE 's/^[[:space:]]*key[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$HCL")
+            if ! aws s3api head-object --bucket "$BUCKET" --key "$KEY" >/dev/null 2>&1; then
+              {
+                echo "Skipped: foundation remote state not found at s3://$BUCKET/$KEY"
+                echo
+                echo "The workload layer reads the foundation layer's remote state, which does"
+                echo "not exist yet. Apply the foundation layer for the '${ENV_NAME}' environment"
+                echo "first (terraform-deploy → layer: foundation), then re-run this plan."
+              } > /tmp/plan_output.txt
+              echo "skipped=true" >> "$GITHUB_OUTPUT"
+              echo "exitcode=0" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
           terraform -chdir=${{ matrix.layer }} plan -no-color -input=false \
             -var-file=environments/${{ env.ENV_NAME }}/terraform.tfvars \
             > /tmp/plan_output.txt 2>&1
@@ -96,11 +118,11 @@ jobs:
             const fs = require('fs');
             const layer = '${{ matrix.layer }}';
             const code = '${{ steps.plan.outputs.exitcode }}';
+            const skipped = '${{ steps.plan.outputs.skipped }}' === 'true';
             const tag = `<!-- tf-plan-bot-${layer} -->`;
             let plan = fs.readFileSync('/tmp/plan_output.txt', 'utf8');
             // exit 0 = no changes, 2 = changes (both fine), 1 = error.
-            const ok = code !== '1';
-            const status = ok ? '✅' : '❌';
+            const status = skipped ? '⏭️' : (code !== '1' ? '✅' : '❌');
             if (plan.length > 60000) plan = plan.slice(0, 60000) + '\n... (truncated)';
             const body = `${tag}\n## ${status} Terraform Plan — \`${layer}\` (${process.env.ENV_NAME})\n\n<details><summary>Show plan</summary>\n\n\`\`\`\n${plan}\n\`\`\`\n\n</details>`;
 
