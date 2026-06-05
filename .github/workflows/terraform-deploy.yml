@@ -23,7 +23,59 @@ permissions:
   id-token: write # OIDC
 
 jobs:
+  # Gate 1 — critical-module unit tests. Mocked providers (no AWS creds, no
+  # infra), env/layer-agnostic, so they run the same for hml and prod on every
+  # deploy. A failure blocks the apply.
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # credential-free
+    strategy:
+      fail-fast: true
+      matrix:
+        module:
+          - foundation/modules/network
+          - foundation/modules/cluster
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "~> 1.10"
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive ${{ matrix.module }}
+
+      - name: Terraform test
+        run: |
+          terraform -chdir=${{ matrix.module }} init -input=false -backend=false
+          terraform -chdir=${{ matrix.module }} test -no-color
+
+  # Gate 2 — Trivy IaC misconfiguration scan. Fails on HIGH/CRITICAL using the
+  # committed .trivyignore. Same scan for hml and prod. No SARIF upload here
+  # (that runs on PRs); this is a hard pre-apply gate.
+  security:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - name: Trivy config scan (gate)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: table
+          severity: HIGH,CRITICAL
+          trivyignores: .trivyignore
+          exit-code: "1"
+
   deploy:
+    needs: [test, security] # apply only after both gates pass
     runs-on: ubuntu-latest
     # Ties to the GitHub Environment: `prod` carries the required reviewer, so a
     # prod run pauses for approval before this job starts.
