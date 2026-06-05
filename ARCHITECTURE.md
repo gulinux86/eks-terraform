@@ -181,11 +181,10 @@ through `terraform_remote_state`.
   destroys `workload` **before** `foundation` for `both` (reverse of apply).
 
 **Defense in depth.** The test + scan gates run twice on purpose: as a **PR gate**
-(blocking the merge) and again as a **pre-apply gate** inside `terraform-deploy`
+(reported on the merge) and again as a **pre-apply gate** inside `terraform-deploy`
 (blocking the apply). Both are environment-agnostic, so `hml` and `prod` get the
-identical checks. On `master`, `test (…network)`, `test (…cluster)` and `trivy`
-are **required status checks** (strict, admins included), so a red check can no
-longer be merged.
+identical checks. The PR checks can optionally be promoted to **required status
+checks** on `master` (branch protection) to hard-block merges on failure.
 
 - **Trade-off:** deploys are intentionally manual rather than auto-apply-on-merge
   — safer for infra, at the cost of one human action per release.
