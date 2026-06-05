@@ -37,6 +37,7 @@ module "bastion" {
   tags              = var.tags
   region            = var.region
   vpc_id            = module.eks_network.vpc_id
+  vpc_cidr          = module.eks_network.vpc_cidr
   private_subnet_id = module.eks_network.subnet_private_1a
   cluster_name      = module.eks_cluster.cluster_name
 }
