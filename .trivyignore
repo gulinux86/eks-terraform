@@ -1,0 +1,19 @@
+# Trivy ignore file — reviewed, documented exceptions only.
+#
+# Each entry MUST carry a reason. These are accepted *portfolio* trade-offs that
+# are already explained in ARCHITECTURE.md (§4, §11). Confirm the exact IDs that
+# fire against the first CI scan and TIGHTEN these for prod.
+#
+# How to verify locally:
+#   trivy config --severity HIGH,CRITICAL .
+
+# EKS public API endpoint is intentionally enabled so Terraform can run from
+# GitHub-hosted runners (no in-VPC self-hosted runners). Gated by
+# public_access_cidrs. See ARCHITECTURE.md §4. Tighten public_access_cidrs in
+# prod; revisit moving to a private-only endpoint.
+AVD-AWS-0040
+
+# public_access_cidrs defaults to 0.0.0.0/0 for hml/demo. This is the documented
+# portfolio default; prod MUST narrow it to office/CI egress ranges
+# (ARCHITECTURE.md §10, §11). Remove this exception once prod restricts the CIDR.
+AVD-AWS-0041
