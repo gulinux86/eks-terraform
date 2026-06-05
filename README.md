@@ -101,9 +101,9 @@ kubectl get nodes
 - AWS authentication via **OIDC** (no static keys).
 - Environment inferred from the base branch (`main` → prod, otherwise → hml) or chosen on dispatch.
 - `prod` is protected by a GitHub Environment (required reviewer).
-- **Required status checks** on `master`: `test (foundation/modules/network)`,
-  `test (foundation/modules/cluster)` and `trivy` must pass before a PR can merge
-  (strict / up-to-date, admins included).
+- The PR checks above can optionally be promoted to **required status checks** on
+  `master` (branch protection) to block merging when they fail — not enforced by
+  default.
 
 ### Quality gates — defense in depth
 
