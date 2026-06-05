@@ -1,0 +1,61 @@
+name: security-scan
+
+# IaC misconfiguration scanning with Trivy as a PR gate. Runs in `config` mode
+# over the Terraform code, fails on HIGH/CRITICAL findings, and uploads SARIF so
+# results appear under the repository's Security tab. Reviewed exceptions live in
+# the committed `.trivyignore`.
+on:
+  pull_request:
+    branches: [master, develop, main]
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+      - "**.hcl"
+      - ".trivyignore"
+      - ".github/workflows/security-scan.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write # upload SARIF to code scanning
+
+concurrency:
+  group: security-scan-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # First pass: generate SARIF for the Security tab. soft-fail so a finding
+      # never blocks the upload step that surfaces it.
+      - name: Trivy config scan (SARIF)
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          trivyignores: .trivyignore
+          exit-code: "0"
+
+      - name: Upload SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@b6a472f63d85b9c78a3ac5e89422239fc15e9b3c # v3.28.1
+        with:
+          sarif_file: trivy-results.sarif
+
+      # Second pass: enforce the gate. exit-code 1 fails the PR on HIGH/CRITICAL.
+      - name: Trivy config scan (gate)
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: table
+          severity: HIGH,CRITICAL
+          trivyignores: .trivyignore
+          exit-code: "1"
