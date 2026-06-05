@@ -33,7 +33,7 @@ jobs:
       # First pass: generate SARIF for the Security tab. soft-fail so a finding
       # never blocks the upload step that surfaces it.
       - name: Trivy config scan (SARIF)
-        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           scan-type: config
           scan-ref: .
@@ -51,7 +51,7 @@ jobs:
 
       # Second pass: enforce the gate. exit-code 1 fails the PR on HIGH/CRITICAL.
       - name: Trivy config scan (gate)
-        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           scan-type: config
           scan-ref: .
