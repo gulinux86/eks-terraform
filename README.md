@@ -75,14 +75,42 @@ kubectl get nodes
 
 ## CI/CD (GitHub Actions)
 
-| Workflow               | Trigger                                        | What it does                                                                       |
-|------------------------|------------------------------------------------|------------------------------------------------------------------------------------|
-| `terraform-plan.yml`   | PR to `develop`/`main`, plus `workflow_dispatch` | `fmt` + `validate` + `plan` (matrix over `foundation`/`workload`); comments the plan on the PR |
-| `terraform-deploy.yml` | `workflow_dispatch` (choose env and layer)     | `plan -out` + `apply` of the saved plan; `prod` requires reviewer approval         |
+| Workflow                | Trigger                                          | What it does                                                                       |
+|-------------------------|--------------------------------------------------|------------------------------------------------------------------------------------|
+| `terraform-plan.yml`    | PR to `develop`/`main`, plus `workflow_dispatch` | `fmt` + `validate` + `plan` (matrix over `foundation`/`workload`); comments the plan on the PR |
+| `terraform-test.yml`    | PR (`**.tf`/`**.tftest.hcl`), `workflow_dispatch` | Native `terraform test` on critical modules; mocked providers → no AWS creds, no infra |
+| `security-scan.yml`     | PR (Terraform paths), `workflow_dispatch`        | Trivy IaC scan (`config` mode); fails on HIGH/CRITICAL; uploads SARIF to the Security tab |
+| `terraform-deploy.yml`  | `workflow_dispatch` (choose env and layer)       | `plan -out` + `apply` of the saved plan; `prod` requires reviewer approval         |
+| `terraform-destroy.yml` | `workflow_dispatch` (env + layer, typed confirm) | `destroy` (workload before foundation for `both`); `prod` requires reviewer approval |
 
 - AWS authentication via **OIDC** (no static keys).
 - Environment inferred from the base branch (`main` → prod, otherwise → hml) or chosen on dispatch.
 - `prod` is protected by a GitHub Environment (required reviewer).
+
+### Tests & security scanning
+
+Critical modules are guarded by native `terraform test` suites (plan-mode,
+mocked providers — they run with no AWS credentials and create no resources):
+
+```bash
+terraform -chdir=foundation/modules/network init -backend=false
+terraform -chdir=foundation/modules/network test
+terraform -chdir=foundation/modules/cluster init -backend=false
+terraform -chdir=foundation/modules/cluster test
+```
+
+To add coverage for another module, drop a `tests/<name>.tftest.hcl` with a
+`mock_provider "aws" {}` block and `command = plan` assertions, then add the
+module path to the matrix in `terraform-test.yml`.
+
+Run the IaC security scan locally the same way CI does:
+
+```bash
+trivy config --severity HIGH,CRITICAL --ignorefile .trivyignore .
+```
+
+Accepted, documented exceptions live in `.trivyignore` (each with a reason).
+Tighten them for `prod` — see `ARCHITECTURE.md` §11.
 
 ## Repository layout
 
