@@ -109,8 +109,17 @@ through `terraform_remote_state`.
 ## 6. Access — bastion + SSM
 
 - **Bastion in a private subnet, no public IP, no inbound SSH.** Access is only
-  through **SSM Session Manager** (the SG has egress-only rules; IMDSv2 is
-  required; the root volume is encrypted).
+  through **SSM Session Manager**; IMDSv2 is required and the root volume is
+  encrypted.
+- **Least-privilege egress (no `0.0.0.0/0`).** The SG allows only: HTTPS to the
+  VPC CIDR (the `ssm`/`ssmmessages`/`ec2messages` interface endpoints and the
+  private EKS API resolve to in-VPC IPs), DNS to the VPC resolver, and HTTPS to
+  the **S3 managed prefix list** (the S3 gateway endpoint). SSM works entirely
+  over PrivateLink — the bastion never needs internet.
+- **Tooling without internet.** `kubectl` is fetched from the Amazon-EKS S3
+  bucket through the gateway endpoint (build date auto-discovered, no `curl`).
+  Helm is intentionally absent — Helm releases are managed by the `workload`
+  layer's provider (see §7), not imperatively on a host.
 - **Dual authorization model, deliberately separated:**
   - `eks:DescribeCluster` (IAM) so `aws eks update-kubeconfig` works — this is an
     AWS-API permission.
@@ -118,8 +127,8 @@ through `terraform_remote_state`.
   - These are two different planes; granting one without the other is a common
     mistake (RBAC without `DescribeCluster` silently breaks kubeconfig setup).
 - **Trade-off:** the bastion is an extra always-on `t3.micro` and an operational
-  hop. The benefit is zero inbound exposure and full Session Manager audit
-  logging vs. an SSH bastion with a public IP and key management.
+  hop. The benefit is zero inbound exposure, no internet egress, and full Session
+  Manager audit logging vs. an SSH bastion with a public IP and key management.
 
 ## 7. Add-ons — AWS Load Balancer Controller (IRSA)
 
@@ -137,6 +146,12 @@ through `terraform_remote_state`.
 
 - **S3 backend with native locking** (`use_lockfile`, Terraform ≥ 1.10) — no
   DynamoDB table to manage.
+- **State bucket encrypted with a customer-managed KMS key** (rotated, created in
+  `bootstrap`), not the AWS-managed SSE-S3 key. State can hold sensitive values,
+  so we want key-policy control and an audit trail on decryption.
+  - **Operational note:** every principal that runs Terraform (the CI deploy
+    roles and any human) needs `kms:Decrypt` / `kms:GenerateDataKey` on this key,
+    otherwise state reads/writes fail.
 - **Partial backend config**: `bucket/key/region` come from
   `environments/<env>/backend.hcl`, so the same code serves `hml` and `prod`.
 - `.terraform.lock.hcl` is committed for reproducible provider resolution; the
@@ -144,15 +159,36 @@ through `terraform_remote_state`.
 
 ## 9. CI/CD (GitHub Actions)
 
-- **OIDC to AWS** — no long-lived access keys in GitHub.
-- `terraform-plan`: runs `fmt` + `validate` + `plan` on PRs (matrix over both
-  layers) and posts the plan as a PR comment.
-- `terraform-deploy`: manual `workflow_dispatch`; applies a **saved plan**
-  (`plan -out` then `apply tfplan`) so apply never re-plans; `prod` is gated by a
-  GitHub Environment requiring a reviewer; `both` applies `foundation` before
+- **OIDC to AWS** — no long-lived access keys in GitHub. All actions are pinned
+  to a commit SHA and run on Node 24 runtimes.
+- `terraform-plan`: `fmt` + `validate` + `plan` on PRs (matrix over both layers),
+  posting the plan as a PR comment. The `workload` plan is skipped when
+  `foundation` has no outputs yet (greenfield/torn-down).
+- `terraform-test`: native `terraform test` on the critical modules. Mocked
+  providers + `command = plan` mean **no AWS credentials and no real infra** —
+  so it runs on PRs from any branch/fork. Guards security-critical invariants
+  (subnet LB tagging, private endpoint, auth mode, secrets encryption, admin
+  access entries).
+- `security-scan`: **Trivy** IaC scan in `config` mode. Uploads SARIF to the
+  Security tab and fails the build on HIGH/CRITICAL; reviewed exceptions live in
+  `.trivyignore`.
+- `terraform-deploy`: manual `workflow_dispatch`. **Gated** — the `terraform test`
+  and Trivy jobs must pass before the apply job runs (and, for prod, before the
+  reviewer is even asked). Then applies a **saved plan** (`plan -out` then
+  `apply tfplan`) so apply never re-plans; `both` applies `foundation` before
   `workload`.
-  - **Trade-off:** deploys are intentionally manual rather than auto-apply-on-merge
-    — safer for infra, at the cost of one human action per release.
+- `terraform-destroy`: manual `workflow_dispatch` with a typed confirmation;
+  destroys `workload` **before** `foundation` for `both` (reverse of apply).
+
+**Defense in depth.** The test + scan gates run twice on purpose: as a **PR gate**
+(blocking the merge) and again as a **pre-apply gate** inside `terraform-deploy`
+(blocking the apply). Both are environment-agnostic, so `hml` and `prod` get the
+identical checks. On `master`, `test (…network)`, `test (…cluster)` and `trivy`
+are **required status checks** (strict, admins included), so a red check can no
+longer be merged.
+
+- **Trade-off:** deploys are intentionally manual rather than auto-apply-on-merge
+  — safer for infra, at the cost of one human action per release.
 
 ## 10. Environments
 
