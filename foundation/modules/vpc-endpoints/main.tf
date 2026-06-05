@@ -12,12 +12,14 @@ resource "aws_security_group" "endpoints_sg" {
     cidr_blocks = [var.vpc_cidr]
   }
 
+  # Interface endpoint ENIs do not initiate outbound connections; scope egress to
+  # HTTPS within the VPC instead of 0.0.0.0/0 (least privilege).
   egress {
-    description = "Allow all outbound"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    description = "HTTPS within the VPC"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
   }
 
   tags = merge(

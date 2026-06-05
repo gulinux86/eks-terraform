@@ -1,7 +1,7 @@
 cidr_block         = "10.1.0.0/16"
 project_name       = "eks-prod"
 region             = "us-east-1"
-kubernetes_version = "1.34"
+kubernetes_version = "1.35"
 
 # Production sizing — requires a paid AWS account (these types are not free-tier).
 instance_types = ["t3.medium"]
