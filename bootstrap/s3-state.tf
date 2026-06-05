@@ -13,13 +13,30 @@ resource "aws_s3_bucket_versioning" "state" {
   }
 }
 
-# Encrypt state at rest (state can contain sensitive values).
+# Customer-managed KMS key for the state bucket. State can contain sensitive
+# values, so we encrypt at rest with a CMK (rotated) rather than the AWS-managed
+# SSE-S3 key — this gives us key policy control and an audit trail on key use.
+resource "aws_kms_key" "state" {
+  description             = "${var.state_bucket_name} terraform state encryption"
+  enable_key_rotation     = true
+  deletion_window_in_days = 7
+}
+
+resource "aws_kms_alias" "state" {
+  name          = "alias/${var.state_bucket_name}-state"
+  target_key_id = aws_kms_key.state.key_id
+}
+
+# Encrypt state at rest with the CMK. bucket_key_enabled lowers KMS request cost
+# by using an S3 bucket key for the data-key operations.
 resource "aws_s3_bucket_server_side_encryption_configuration" "state" {
   bucket = aws_s3_bucket.state.id
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.state.arn
     }
+    bucket_key_enabled = true
   }
 }
 
