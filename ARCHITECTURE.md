@@ -95,6 +95,20 @@ through `terraform_remote_state`.
 - **Authentication mode `API_AND_CONFIG_MAP`** so we can use modern **Access
   Entries** while remaining compatible with anything still reading the aws-auth
   ConfigMap.
+- **Core add-ons managed as code (`vpc-cni`, `coredns`, `kube-proxy`).** Declared
+  via `aws_eks_addon` (module `eks-addons`) with the version resolved for the
+  cluster's Kubernetes version and `resolve_conflicts = OVERWRITE`.
+  - **Why this matters (not cosmetic):** left self-managed, these add-ons stay at
+    whatever version EKS shipped at cluster creation and are **invisible to the
+    IaC**. During a control-plane upgrade they silently fall out of supported
+    version skew — e.g. a `1.34`-era `kube-proxy`/`coredns` running under a `1.35`
+    API server, surfacing as intermittent DNS/routing failures whose root cause is
+    hard to trace. Managing them makes the version a reviewed part of the upgrade
+    (the `1.34 → 1.35` bump in this repo updates them in the same change).
+  - **Deferred (production-hardening, intentionally not built for a 1–2 node
+    demo):** dedicated VPC-CNI IRSA role, native network policy
+    (`ENABLE_NETWORK_POLICY`), prefix delegation, and the EBS-CSI / metrics-server
+    add-ons — added when a workload actually needs them (see §11).
 
 ## 5. Compute — managed node group
 
@@ -202,7 +216,8 @@ additionally narrow `public_access_cidrs` from the default `0.0.0.0/0`.
 | API endpoint | Public + CIDR allowlist | Private-only + in-VPC runners / VPN |
 | `public_access_cidrs` | `0.0.0.0/0` default | Office/CI egress ranges only |
 | Egress | NAT + overlapping endpoints | Drop NAT, complete endpoint set |
-| Scaling | Fixed managed node group | Karpenter / Cluster Autoscaler |
-| Add-ons | ALB controller only | + ExternalDNS, metrics, autoscaler, policy agents |
-| State bucket | Single shared bucket | Per-account/per-env buckets + bucket policies |
+| Scaling | Fixed managed node group | Karpenter (+ small system node group) |
+| Core add-ons | vpc-cni/coredns/kube-proxy managed + pinned | + dedicated VPC-CNI IRSA, network policy, prefix delegation |
+| Cluster add-ons | ALB controller (IRSA + Helm) | + External Secrets, cert-manager, ExternalDNS, EBS-CSI, metrics-server, policy agents |
+| State bucket | Single shared bucket (KMS CMK) | Per-account/per-env buckets + bucket policies |
 ```
