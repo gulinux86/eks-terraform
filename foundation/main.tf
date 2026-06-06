@@ -52,3 +52,14 @@ module "vpc_endpoints" {
   private_subnet_ids      = module.eks_network.private_subnet_ids
   private_route_table_ids = module.eks_network.private_route_table_ids
 }
+
+# Managed core add-ons. Applied after the node group so coredns has compute to
+# schedule on; OVERWRITE adopts the EKS-installed defaults into IaC control.
+module "eks_addons" {
+  source             = "./modules/eks-addons"
+  cluster_name       = module.eks_cluster.cluster_name
+  kubernetes_version = var.kubernetes_version
+  tags               = var.tags
+
+  depends_on = [module.eks_managed-node-group]
+}
