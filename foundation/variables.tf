@@ -21,7 +21,7 @@ variable "tags" {
 variable "kubernetes_version" {
   type        = string
   description = "Kubernetes version for the EKS cluster. Pin a version in standard support (avoid extended-support versions)."
-  default     = "1.34"
+  default     = "1.35"
 }
 
 variable "instance_types" {
