@@ -1,4 +1,4 @@
-# foundation — EKS platform layer (network, cluster, nodes, bastion, endpoints)
+# foundation — EKS platform layer (network, cluster, nodes, bastion, endpoints, core add-ons)
 
 ## Requirements
 
@@ -13,6 +13,7 @@
 | Name | Source | Version |
 |------|--------|---------|
 | <a name="module_bastion"></a> [bastion](#module\_bastion) | ./modules/bastion | n/a |
+| <a name="module_eks_addons"></a> [eks\_addons](#module\_eks\_addons) | ./modules/eks-addons | n/a |
 | <a name="module_eks_cluster"></a> [eks\_cluster](#module\_eks\_cluster) | ./modules/cluster | n/a |
 | <a name="module_eks_managed-node-group"></a> [eks\_managed-node-group](#module\_eks\_managed-node-group) | ./modules/managed-node-group | n/a |
 | <a name="module_eks_network"></a> [eks\_network](#module\_eks\_network) | ./modules/network | n/a |
@@ -30,7 +31,7 @@
 | <a name="input_desired_size"></a> [desired\_size](#input\_desired\_size) | Desired number of nodes | `number` | `1` | no |
 | <a name="input_endpoint_public_access"></a> [endpoint\_public\_access](#input\_endpoint\_public\_access) | Expose the EKS API server publicly so Terraform (GitHub-hosted runners) and operators can reach it. Private access remains enabled. | `bool` | `true` | no |
 | <a name="input_instance_types"></a> [instance\_types](#input\_instance\_types) | EC2 instance types for the managed node group. On a new AWS account under the Free Plan, only free-tier-eligible types launch (e.g. t3.small, t3.micro, c7i-flex.large, m7i-flex.large). | `list(string)` | <pre>[<br/>  "t3.small"<br/>]</pre> | no |
-| <a name="input_kubernetes_version"></a> [kubernetes\_version](#input\_kubernetes\_version) | Kubernetes version for the EKS cluster. Pin a version in standard support (avoid extended-support versions). | `string` | `"1.34"` | no |
+| <a name="input_kubernetes_version"></a> [kubernetes\_version](#input\_kubernetes\_version) | Kubernetes version for the EKS cluster. Pin a version in standard support (avoid extended-support versions). | `string` | `"1.35"` | no |
 | <a name="input_max_size"></a> [max\_size](#input\_max\_size) | Maximum number of nodes | `number` | `2` | no |
 | <a name="input_min_size"></a> [min\_size](#input\_min\_size) | Minimum number of nodes | `number` | `1` | no |
 | <a name="input_public_access_cidrs"></a> [public\_access\_cidrs](#input\_public\_access\_cidrs) | CIDRs allowed to reach the public API endpoint. Tighten this per environment (e.g. office/CI egress ranges). | `list(string)` | <pre>[<br/>  "0.0.0.0/0"<br/>]</pre> | no |

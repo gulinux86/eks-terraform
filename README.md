@@ -35,7 +35,7 @@ GitHub Actions CI/CD pipeline.
 | Layer        | Responsibility                                                                   | State                                |
 |--------------|----------------------------------------------------------------------------------|--------------------------------------|
 | `bootstrap`  | One-time per account: KMS-encrypted S3 **state bucket** + GitHub Actions **OIDC role** | local state (committed `terraform.tfstate`) |
-| `foundation` | VPC, subnets, NAT/IGW, EKS, KMS, OIDC, managed node group, bastion, VPC endpoints | `foundation/<env>/terraform.tfstate` |
+| `foundation` | VPC, subnets, NAT/IGW, EKS, KMS, OIDC, managed node group, bastion, VPC endpoints, core add-ons (vpc-cni/coredns/kube-proxy) | `foundation/<env>/terraform.tfstate` |
 | `workload`   | Cluster add-ons — today the AWS Load Balancer Controller (IRSA + Helm)            | `workload/<env>/terraform.tfstate`   |
 
 `bootstrap` runs once to create the backend the other layers use. The `workload`
@@ -131,6 +131,8 @@ terraform -chdir=foundation/modules/network init -backend=false
 terraform -chdir=foundation/modules/network test
 terraform -chdir=foundation/modules/cluster init -backend=false
 terraform -chdir=foundation/modules/cluster test
+terraform -chdir=foundation/modules/eks-addons init -backend=false
+terraform -chdir=foundation/modules/eks-addons test
 ```
 
 To add coverage for another module, drop a `tests/<name>.tftest.hcl` with a
@@ -154,8 +156,8 @@ bootstrap/                # one-time: KMS-encrypted state bucket + OIDC role (lo
 foundation/
   main.tf  provider.tf  variables.tf  backend.tf  outputs.tf  README.md
   environments/{hml,prod}/{terraform.tfvars,backend.hcl}
-  modules/{network,cluster,managed-node-group,bastion,vpc-endpoints}/
-    tests/*.tftest.hcl    # native terraform test (network, cluster)
+  modules/{network,cluster,managed-node-group,bastion,vpc-endpoints,eks-addons}/
+    tests/*.tftest.hcl    # native terraform test (network, cluster, eks-addons)
 workload/
   main.tf  provider.tf  variables.tf  backend.tf  README.md
   environments/{hml,prod}/{terraform.tfvars,backend.hcl}
