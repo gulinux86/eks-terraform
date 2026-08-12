@@ -59,6 +59,9 @@ module "eks_addons" {
   source             = "./modules/eks-addons"
   cluster_name       = module.eks_cluster.cluster_name
   kubernetes_version = var.kubernetes_version
+  vpc_cni_version    = var.vpc_cni_version
+  coredns_version    = var.coredns_version
+  kube_proxy_version = var.kube_proxy_version
   tags               = var.tags
 
   depends_on = [module.eks_managed-node-group]
