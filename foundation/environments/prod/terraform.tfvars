@@ -2,6 +2,9 @@ cidr_block         = "10.1.0.0/16"
 project_name       = "eks-prod"
 region             = "us-east-1"
 kubernetes_version = "1.35"
+vpc_cni_version    = "v1.22.4-eksbuild.3"
+coredns_version    = "v1.13.2-eksbuild.11"
+kube_proxy_version = "v1.35.3-eksbuild.18"
 
 # Production sizing — requires a paid AWS account (these types are not free-tier).
 instance_types = ["t3.medium"]
