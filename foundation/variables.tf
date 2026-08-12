@@ -24,6 +24,24 @@ variable "kubernetes_version" {
   default     = "1.35"
 }
 
+variable "vpc_cni_version" {
+  type        = string
+  description = "Pin the vpc-cni add-on version. Null resolves the latest compatible with kubernetes_version."
+  default     = null
+}
+
+variable "coredns_version" {
+  type        = string
+  description = "Pin the coredns add-on version. Null resolves the latest compatible with kubernetes_version."
+  default     = null
+}
+
+variable "kube_proxy_version" {
+  type        = string
+  description = "Pin the kube-proxy add-on version. Null resolves the latest compatible with kubernetes_version."
+  default     = null
+}
+
 variable "instance_types" {
   type        = list(string)
   description = "EC2 instance types for the managed node group. On a new AWS account under the Free Plan, only free-tier-eligible types launch (e.g. t3.small, t3.micro, c7i-flex.large, m7i-flex.large)."
