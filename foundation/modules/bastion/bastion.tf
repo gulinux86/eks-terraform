@@ -155,13 +155,22 @@ resource "aws_instance" "bastion" {
     # kubectl with no setup at all.
     cat > /etc/profile.d/kube.sh <<'PROFILE'
     export KUBECONFIG=/etc/kubeconfig
-    alias k=kubectl
     if command -v kubectl >/dev/null 2>&1; then
       source <(kubectl completion bash) 2>/dev/null || true
       complete -o default -F __start_kubectl k 2>/dev/null || true
     fi
     PROFILE
     chmod 0644 /etc/profile.d/kube.sh
+
+    # `k` is a real script, not a shell alias. An alias only exists in an
+    # interactive shell that sourced it; a script on PATH works everywhere —
+    # including non-interactive shells and `ssm send-command`. It also carries its
+    # own KUBECONFIG default, so it works even if the profile was never sourced.
+    cat > /usr/local/bin/k <<'WRAPPER'
+    #!/bin/sh
+    exec env KUBECONFIG="$${KUBECONFIG:-/etc/kubeconfig}" kubectl "$@"
+    WRAPPER
+    chmod 0755 /usr/local/bin/k
   EOF
 
   # Changing the boot script must replace the instance: user_data only runs on
