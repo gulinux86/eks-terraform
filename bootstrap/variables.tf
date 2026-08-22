@@ -20,12 +20,6 @@ variable "environment" {
   }
 }
 
-variable "role_name" {
-  type        = string
-  description = "DEPRECATED — name of the single legacy CI role. Kept alive as the fallback during the plan/deploy role cutover; remove once the new roles are verified."
-  default     = "github-actions-eks-terraform"
-}
-
 variable "plan_role_name" {
   type        = string
   description = "Name of the read-only IAM role assumed by terraform-plan"
@@ -42,12 +36,6 @@ variable "state_bucket_name" {
   type        = string
   description = "S3 bucket that stores the foundation/workload remote state. Must match the bucket in environments/<env>/backend.hcl."
   default     = "eks-development-tfstate-889384902110"
-}
-
-variable "policy_arn" {
-  type        = string
-  description = "DEPRECATED — managed policy for the legacy single role. Removed together with role_name after cutover."
-  default     = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
 
 variable "plan_policy_arn" {

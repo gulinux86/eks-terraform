@@ -1,9 +1,4 @@
 locals {
-  # DEPRECATED — trust of the legacy single role. The wildcard accepts every
-  # workflow context, so the pull-request plan job assumed the same role that can
-  # delete the account. Kept only as the cutover fallback; removed with the role.
-  allowed_subs = ["repo:${var.github_repository}:*"]
-
   # GitHub stamps a `sub` claim describing how a run was triggered. Splitting the
   # trust on that claim is what separates readers from writers:
   #
@@ -63,36 +58,6 @@ resource "aws_iam_openid_connect_provider" "github_actions" {
   url             = "https://token.actions.githubusercontent.com"
   client_id_list  = ["sts.amazonaws.com"]
   thumbprint_list = data.tls_certificate.github_actions.certificates[*].sha1_fingerprint
-}
-
-# Role assumed by the CI workflows. No static keys: trust is established by the
-# OIDC token, scoped to this repository, requesting the sts.amazonaws.com audience.
-resource "aws_iam_role" "github_actions" {
-  name = var.role_name
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect    = "Allow"
-        Action    = "sts:AssumeRoleWithWebIdentity"
-        Principal = { Federated = aws_iam_openid_connect_provider.github_actions.arn }
-        Condition = {
-          StringEquals = {
-            "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-          }
-          StringLike = {
-            "token.actions.githubusercontent.com:sub" = local.allowed_subs
-          }
-        }
-      }
-    ]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "ci" {
-  role       = aws_iam_role.github_actions.name
-  policy_arn = var.policy_arn
 }
 
 # ---------------------------------------------------------------------------
