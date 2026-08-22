@@ -152,15 +152,33 @@ through `terraform_remote_state`.
   private EKS API resolve to in-VPC IPs), DNS to the VPC resolver, and HTTPS to
   the **S3 managed prefix list** (the S3 gateway endpoint). SSM works entirely
   over PrivateLink — the bastion never needs internet.
-- **Tooling without internet.** `kubectl` is fetched from the Amazon-EKS S3
-  bucket through the gateway endpoint (build date auto-discovered, no `curl`).
-  The role carries a read grant scoped to that one bucket — it was missing
-  originally, so the boot script failed with `AccessDenied` and, because the
-  failure was swallowed by a bare `if`, kubectl was simply absent with nothing in
-  the log explaining why. The script now logs every failure path, and
-  `user_data_replace_on_change` forces a new instance whenever the script changes:
-  boot scripts only run once, so without it the code and the running host drift
-  apart silently.
+- **Tooling without internet.** `kubectl` is installed from a project-owned bucket
+  **in the VPC's own region**, reached through the S3 gateway endpoint.
+  - **Why not AWS's public bucket.** `amazon-eks` lives in **us-west-2**. A gateway
+    endpoint only routes to S3 in its own region, and the bastion's security group
+    permits egress only to the in-region S3 prefix list — so a cross-region request
+    matched no egress rule and was **dropped silently**. Not `AccessDenied`, not a
+    refused connection: a hang. The original design promised both "no internet
+    egress" and a bucket in another region, and those cannot both hold. Copying the
+    binary into an in-region bucket makes the endpoint the right path again and
+    keeps the bastion at zero internet.
+  - **Who puts the binary there.** The pipeline, after applying `foundation` — the
+    runner has internet, the bastion deliberately does not. Terraform owns the
+    bucket but not the binary: `aws_s3_object` would need the ~50 MB file on disk
+    at plan time, turning every local plan into a build step.
+  - **Failures are loud.** An earlier version wrapped the download in a bare `if`
+    that discarded the error, so a broken install looked exactly like a working
+    one — which is why it went unnoticed for so long. Every path now names what to
+    check, and `install-kubectl` stays on the host to re-run once the bucket is
+    seeded.
+  - `user_data_replace_on_change` forces a new instance whenever the boot script
+    changes: it runs once, so without this the code and the running host drift
+    apart in silence.
+  - The tooling bucket uses SSE-S3, not a CMK, with the exception scoped inline
+    rather than in `.trivyignore` — its contents are public binaries, and a
+    repo-wide suppression would also silence the rule for the state bucket, where
+    the key matters.
+
   Helm is intentionally absent — Helm releases are managed by the `workload`
   layer's provider (see §7), not imperatively on a host.
 - **Dual authorization model, deliberately separated:**

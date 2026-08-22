@@ -148,3 +148,35 @@ jobs:
             terraform -chdir="$L" apply -input=false -auto-approve tfplan
             echo "::endgroup::"
           done
+
+      # The bastion installs kubectl from an in-region bucket rather than AWS's
+      # public amazon-eks bucket, which lives in us-west-2 — a gateway endpoint
+      # cannot route there and the bastion has no internet, so the cross-region
+      # fetch simply hung. The runner has internet, so it does the fetch once and
+      # copies the binary in. Terraform owns the bucket; it does not own a 50 MB
+      # binary, which would have to sit on disk at plan time.
+      - name: Seed the bastion tooling bucket with kubectl
+        if: contains(env.LAYERS, 'foundation')
+        run: |
+          set -euo pipefail
+          BUCKET=$(terraform -chdir=foundation output -raw tooling_bucket)
+          KVER=$(terraform -chdir=foundation output -raw kubectl_version)
+          KEY="kubectl/$KVER/kubectl"
+
+          if aws s3 ls "s3://$BUCKET/$KEY" >/dev/null 2>&1; then
+            echo "already seeded: s3://$BUCKET/$KEY"
+            exit 0
+          fi
+
+          # AWS publishes kubectl to a single bucket in us-west-2, under dated
+          # builds. Discover the newest rather than hardcoding a date that rots.
+          KDATE=$(aws s3 ls "s3://amazon-eks/$KVER/" --region us-west-2 \
+            | awk '{print $2}' | tr -d / | sort | tail -1)
+          [ -n "$KDATE" ] || { echo "no builds under s3://amazon-eks/$KVER/ — is $KVER a full x.y.z version?" >&2; exit 1; }
+          echo "newest build for $KVER is $KDATE"
+
+          aws s3 cp "s3://amazon-eks/$KVER/$KDATE/bin/linux/amd64/kubectl" /tmp/kubectl --region us-west-2
+          chmod +x /tmp/kubectl
+          /tmp/kubectl version --client
+          aws s3 cp /tmp/kubectl "s3://$BUCKET/$KEY"
+          echo "seeded s3://$BUCKET/$KEY"
