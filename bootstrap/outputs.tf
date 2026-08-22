@@ -1,8 +1,3 @@
-output "role_arn" {
-  value       = aws_iam_role.github_actions.arn
-  description = "DEPRECATED — ARN of the legacy single CI role (*_AWS_ROLE_ARN). Retired once the plan/deploy roles are verified."
-}
-
 output "plan_role_arn" {
   value       = aws_iam_role.plan.arn
   description = "ARN of the read-only plan role. Set as the <ENV>_PLAN_ROLE_ARN GitHub secret."
