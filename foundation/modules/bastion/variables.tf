@@ -44,3 +44,9 @@ variable "kubectl_version" {
   description = "kubectl version to install from the Amazon EKS S3 bucket (reached via the S3 gateway endpoint, no internet egress). Keep within one minor of the cluster version. The build date is auto-discovered from the bucket."
   default     = "1.35.0"
 }
+
+variable "manage_ssm_session_shell" {
+  type        = bool
+  description = "Create the account-wide SSM-SessionManagerRunShell document so sessions start a login shell (making /etc/profile.d apply). Only one such document can exist per account, so set false if another environment in the same account already owns it."
+  default     = true
+}
