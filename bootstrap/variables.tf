@@ -10,10 +10,32 @@ variable "github_repository" {
   default     = "gulinux86/eks-terraform"
 }
 
+variable "environment" {
+  type        = string
+  description = "Environment this AWS account serves (hml or prod). The deploy role trusts only this environment's GitHub Environment claim, so bootstrapping an account is a deliberate choice — there is no default."
+
+  validation {
+    condition     = contains(["hml", "prod"], var.environment)
+    error_message = "environment must be \"hml\" or \"prod\" — it becomes the GitHub Environment name in the deploy role's OIDC trust policy."
+  }
+}
+
 variable "role_name" {
   type        = string
-  description = "Name of the IAM role GitHub Actions will assume via OIDC"
+  description = "DEPRECATED — name of the single legacy CI role. Kept alive as the fallback during the plan/deploy role cutover; remove once the new roles are verified."
   default     = "github-actions-eks-terraform"
+}
+
+variable "plan_role_name" {
+  type        = string
+  description = "Name of the read-only IAM role assumed by terraform-plan"
+  default     = "github-actions-eks-plan"
+}
+
+variable "deploy_role_name" {
+  type        = string
+  description = "Name of the write-capable IAM role assumed by terraform-deploy and terraform-destroy"
+  default     = "github-actions-eks-deploy"
 }
 
 variable "state_bucket_name" {
@@ -24,7 +46,19 @@ variable "state_bucket_name" {
 
 variable "policy_arn" {
   type        = string
-  description = "Managed policy attached to the CI role. AdministratorAccess is a deliberate bootstrap simplification — scope it down with a custom policy / permission boundary for real production."
+  description = "DEPRECATED — managed policy for the legacy single role. Removed together with role_name after cutover."
+  default     = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
+
+variable "plan_policy_arn" {
+  type        = string
+  description = "Managed policy attached to the plan role. Read-only by design; the role additionally gets an inline kms:Decrypt grant on the state key, which ReadOnlyAccess does not cover."
+  default     = "arn:aws:iam::aws:policy/ReadOnlyAccess"
+}
+
+variable "deploy_policy_arn" {
+  type        = string
+  description = "Managed policy attached to the deploy role. AdministratorAccess remains a known gap (ARCHITECTURE.md §11): sizing a custom policy for EKS is iterative and was deliberately deferred, since the role split already removes this credential from pull-request reach."
   default     = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
 

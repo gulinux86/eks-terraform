@@ -12,8 +12,11 @@ desired_size   = 2
 min_size       = 2
 max_size       = 4
 
-# Set to the prod account's CI deploy role ARN once that account exists.
-cluster_admin_role_arns = ["arn:aws:iam::000000000000:role/github-actions-eks-terraform"]
+# PLACEHOLDER — the prod AWS account does not exist yet. Once it does, bootstrap
+# it with environment = "prod" and set this to that account's *deploy* role
+# (github-actions-eks-deploy). The read-only plan role must NOT be listed here:
+# it holds no cluster access by design (ARCHITECTURE.md §9).
+cluster_admin_role_arns = ["arn:aws:iam::000000000000:role/github-actions-eks-deploy"]
 
 tags = {
   Project     = "eks"
