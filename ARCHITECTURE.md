@@ -173,12 +173,26 @@ through `terraform_remote_state`.
     cannot be inverted without splitting the apply, so instead of failing once and
     leaving the operator to fix it, a systemd unit retries until the object appears
     and then stops.
-  - **A session needs no setup.** The unit also writes a world-readable
-    `/etc/kubeconfig` — it holds no secret, since auth is an exec call to
-    `aws eks get-token` using the instance role — and `/etc/profile.d/kube.sh`
-    points `KUBECONFIG` at it, adds `k` as an alias and wires up completion. SSM
-    sessions run as `ssm-user`, so a kubeconfig under `/root` would have been
-    invisible to them.
+  - **A session needs no setup**, and getting there took two mechanisms because
+    one was not enough:
+    - The unit writes a world-readable `/etc/kubeconfig` — it holds no secret,
+      since auth is an exec call to `aws eks get-token` under the instance role —
+      and `/etc/profile.d/kube.sh` points `KUBECONFIG` at it and wires up
+      completion. Writing it to a user's home was not an option: `ssm-user` and
+      its home are created on **first session**, ~16 minutes after boot in one
+      observed case, so nothing at boot time can put a file there.
+    - `/etc/profile.d` is only read by **login** shells, and a Session Manager
+      session starts a plain `sh`. The file was written correctly and never read.
+      An `SSM-SessionManagerRunShell` document with `shellProfile = "bash -l"`
+      fixes the cause rather than the symptom: the standard mechanism works again,
+      for this and for anything added to `profile.d` later. That document is
+      **account-wide**, so a flag exists for accounts holding more than one
+      environment.
+    - `k` is a **script on PATH**, not a shell alias. An alias exists only in an
+      interactive shell that sourced it; a script works everywhere, including
+      non-interactive shells and `ssm send-command`, and it carries its own
+      `KUBECONFIG` default so it survives a session that never sourced the
+      profile.
   - **Failures are loud.** An earlier version wrapped the download in a bare `if`
     that discarded the error, so a broken install looked exactly like a working
     one — which is why it went unnoticed for so long.
