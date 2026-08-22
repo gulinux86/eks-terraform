@@ -152,6 +152,19 @@ through `terraform_remote_state`.
   - An **EKS Access Entry** + `AmazonEKSClusterAdminPolicy` for in-cluster RBAC.
   - These are two different planes; granting one without the other is a common
     mistake (RBAC without `DescribeCluster` silently breaks kubeconfig setup).
+  - **The same split explains the console.** An account administrator sees the
+    cluster in the EKS console but gets `Unauthorized` on the **Resources** tab,
+    because listing Kubernetes objects goes through RBAC, not IAM. Provider v6 does
+    not bootstrap the creator either (`bootstrap_cluster_creator_admin_permissions`
+    defaults to false), so *nobody* has in-cluster access unless an Access Entry
+    says so. In `hml` the operator's console identity is listed in
+    `cluster_admin_role_arns` to make that tab usable. It grants no capability the
+    principal lacked — it already holds `AdministratorAccess` and could add the
+    entry by hand — but it records the grant in code instead of a click that
+    disappears on the next rebuild.
+  - **Not for prod.** A human IAM user with standing cluster-admin is an audit
+    finding waiting to happen. Production should grant a role assumed for a
+    session, not a long-lived user. See §11.
 - **Trade-off:** the bastion is an extra always-on `t3.micro` and an operational
   hop. The benefit is zero inbound exposure, no internet egress, and full Session
   Manager audit logging vs. an SSH bastion with a public IP and key management.
@@ -281,5 +294,6 @@ additionally narrow `public_access_cidrs` from the default `0.0.0.0/0`.
 | Cluster add-ons | ALB controller (IRSA + Helm) | + External Secrets, cert-manager, ExternalDNS, EBS-CSI, metrics-server, policy agents |
 | State bucket | Single shared bucket (KMS CMK) | Per-account/per-env buckets + bucket policies |
 | CI deploy role | Split from the plan role; `AdministratorAccess` | Custom policy sized to the managed services + permission boundary |
+| Human cluster access | hml lists an IAM **user** as cluster-admin so the console Resources tab works | A role assumed for a session; no standing cluster-admin on a long-lived user |
 | Prod approval | Reviewer approves before the job starts | Split deploy into plan → approve-with-plan → apply |
 ```
