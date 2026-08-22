@@ -191,6 +191,32 @@ through `terraform_remote_state`.
   - **Trade-off:** pinning chart `1.6.2` and provider versions favors
     reproducibility over always-latest; bump deliberately.
 
+- **Argo CD (chart `10.4.0`, Argo CD `v3.5.1`)** — installed by the Helm provider,
+  last in the `workload` layer.
+  - **Why Terraform installs this one thing and then stops.** Terraform is a poor
+    tool for *custom resources*: `kubernetes_manifest` needs a CRD's schema at
+    **plan** time, and on a first apply the CRD does not exist yet. Helm hands
+    manifests to the cluster at apply time and never asks Terraform to understand
+    them. So Terraform installs Argo CD — which brings the three CRDs and their
+    controllers — and from there custom resources are delivered through Argo CD
+    rather than through Terraform. That is what unblocks Karpenter `NodePool`s and
+    Argo Rollouts later, without fighting the plan-time schema problem.
+  - **Installed bare, on purpose.** No root `Application`, no app-of-apps, no
+    repository wired up, no ingress, no exposed UI (`ClusterIP` + port-forward).
+    Each of those is a decision with its own consequences — repository credentials
+    need a source, an exposed UI needs TLS and an auth story.
+  - **The ALB Controller was not migrated.** It stays a Terraform-owned
+    `helm_release`. Two owners for one resource is the anti-pattern; moving it to
+    Argo CD is its own reviewed change, not a side effect of this one.
+  - **Sizing is a hard constraint, not a preference.** The VPC CNI caps pods per
+    node by ENI capacity: a `t3.small` allows **11**. Six are already taken by the
+    cluster's own components and the ALB Controller, and Argo CD needs **7**
+    (verified by rendering the chart, not estimated). Hence `desired_size = 2` in
+    hml. HA mode stays off — `redis-ha` alone is three more pods.
+  - **Sharp edge on upgrades:** Helm 3 does not upgrade CRDs on `helm upgrade`. A
+    chart bump that changes a CRD needs it applied out of band. `crds.keep = true`
+    so uninstalling the release never cascade-deletes live `Application` objects.
+
 ## 8. State & backend
 
 - **S3 backend with native locking** (`use_lockfile`, Terraform ≥ 1.10) — no

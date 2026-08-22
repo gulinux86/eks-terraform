@@ -8,8 +8,17 @@ kube_proxy_version = "v1.35.3-eksbuild.18"
 
 # Free-tier-eligible node (new-account Free Plan only allows these types).
 # t3.small = 2 vCPU / 2 GiB, x86_64 (matches the AL2023 x86_64 AMI).
+#
+# Two nodes, because of a hard limit rather than a preference. The VPC CNI caps
+# pods per node by ENI capacity, and a t3.small allows only 11 — measured, not
+# estimated. The cluster's own components (coredns ×2, kube-proxy, aws-node) plus
+# the load-balancer controller ×2 already occupy 6, leaving 5. Argo CD needs 7
+# pods (server, repo-server, application-controller, applicationset-controller,
+# notifications-controller, redis, dex), so on a single node two of them would sit
+# Pending forever. Raising the instance type would also work, but t3.small is what
+# the account's Free Plan allows.
 instance_types = ["t3.small"]
-desired_size   = 1
+desired_size   = 2
 min_size       = 1
 max_size       = 2
 
