@@ -1,3 +1,50 @@
+# Launch template carrying nothing but tags.
+#
+# Instance names have to be applied *at launch*, and nothing else can do it:
+# `tags` on aws_eks_node_group land on the node group, and an
+# aws_autoscaling_group_tag can only be created after the node group exists — by
+# which point EKS has already launched the nodes. propagate_at_launch then only
+# helps a future launch that, in an environment rebuilt from scratch, never comes.
+# That approach was tried first and observed to leave instances unnamed.
+#
+# Omitting image_id is deliberate: EKS keeps supplying the EKS-optimized AMI for
+# ami_type and keeps injecting the bootstrap user data. This template adds tags and
+# takes over nothing.
+#
+# Sharp edge: a change here creates a new template version, and the node group rolls
+# its nodes to adopt it. That is correct behaviour, and a reason to keep this
+# template boring.
+resource "aws_launch_template" "nodes" {
+  name_prefix = "${var.project_name}-node-"
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = merge(
+      var.tags,
+      {
+        Name = "${var.project_name}-node"
+      }
+    )
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags = merge(
+      var.tags,
+      {
+        Name = "${var.project_name}-node"
+      }
+    )
+  }
+
+  tags = merge(
+    var.tags,
+    {
+      Name = "${var.project_name}-node-lt"
+    }
+  )
+}
+
 resource "aws_eks_node_group" "eks_managed_node_group" {
   cluster_name    = var.cluster_name
   node_group_name = "${var.project_name}-management-node-group"
@@ -14,6 +61,11 @@ resource "aws_eks_node_group" "eks_managed_node_group" {
       Name = "${var.project_name}-node-group"
     }
   )
+  launch_template {
+    id      = aws_launch_template.nodes.id
+    version = aws_launch_template.nodes.latest_version
+  }
+
   scaling_config {
     desired_size = var.desired_size
     max_size     = var.max_size
@@ -33,29 +85,4 @@ resource "aws_eks_node_group" "eks_managed_node_group" {
     aws_iam_role_policy_attachment.eks_managed_role_attachment_ecr,
     aws_iam_role_policy_attachment.eks_managed_role_attachment_cni
   ]
-}
-
-# Name tag for the worker instances.
-#
-# The `tags` argument above lands on the node group resource, not on the EC2
-# instances — EKS tags those with eks:cluster-name / eks:nodegroup-name and no
-# Name, which is why they show up blank in the console. Tagging the ASG that EKS
-# created, with propagation on launch, is the light way to fix that.
-#
-# The alternative is a custom launch template with tag_specifications. It tags
-# instances immediately rather than on next launch, but it means owning a launch
-# template whose version changes can cascade into node replacement — a real
-# operational edge to accept for a console label. Revisit if the module ever needs
-# a launch template for its own sake (custom kubelet args, a private AMI).
-#
-# Consequence worth stating: propagate_at_launch only affects instances created
-# after this lands. Nodes already running stay unnamed until they are replaced.
-resource "aws_autoscaling_group_tag" "node_name" {
-  autoscaling_group_name = aws_eks_node_group.eks_managed_node_group.resources[0].autoscaling_groups[0].name
-
-  tag {
-    key                 = "Name"
-    value               = "${var.project_name}-node"
-    propagate_at_launch = true
-  }
 }

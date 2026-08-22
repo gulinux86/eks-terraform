@@ -131,16 +131,18 @@ through `terraform_remote_state`.
   - **Trade-off:** managed node groups are simpler and AWS-maintained but less
     flexible than self-managed ASGs or Karpenter. For a platform baseline,
     simplicity wins; Karpenter would be the next step for real workload scaling.
-  - **Instance `Name` tags come from the ASG, not the node group.** Tags set on
-    `aws_eks_node_group` land on the node group; EKS tags the instances only with
-    `eks:cluster-name` / `eks:nodegroup-name`, so they appear unnamed in the
-    console. An `aws_autoscaling_group_tag` with `propagate_at_launch` supplies the
-    name. The alternative — a custom launch template with `tag_specifications` —
-    tags instances immediately instead of on next launch, but means owning a launch
-    template whose version changes can cascade into node replacement. Not worth
-    that for a console label; revisit if a launch template is ever needed on its
-    own merits (custom kubelet args, a private AMI). Consequence: nodes already
-    running stay unnamed until replaced.
+  - **Instance `Name` tags come from a launch template.** Nothing else applies them
+    at launch: `tags` on `aws_eks_node_group` land on the node group, and an
+    `aws_autoscaling_group_tag` can only be created *after* the node group exists —
+    by which time EKS has already launched the nodes, so `propagate_at_launch` only
+    helps a future launch that, in an environment rebuilt from scratch, never comes.
+    That was tried first and observed to leave instances unnamed. The launch
+    template omits `image_id`, so EKS keeps supplying the EKS-optimized AMI and the
+    bootstrap user data; it carries tags and takes over nothing.
+    - **Sharp edge:** a change to the template creates a new version and the node
+      group rolls its nodes to adopt it. Correct behaviour, and a reason to keep the
+      template boring. Adding it to an existing node group also forces one
+      replacement.
 
 ## 6. Access — bastion + SSM
 
@@ -166,11 +168,20 @@ through `terraform_remote_state`.
     runner has internet, the bastion deliberately does not. Terraform owns the
     bucket but not the binary: `aws_s3_object` would need the ~50 MB file on disk
     at plan time, turning every local plan into a build step.
+  - **The host converges on its own.** The bastion is created *during* the
+    foundation apply; the bucket is seeded by the pipeline *after* it. That order
+    cannot be inverted without splitting the apply, so instead of failing once and
+    leaving the operator to fix it, a systemd unit retries until the object appears
+    and then stops.
+  - **A session needs no setup.** The unit also writes a world-readable
+    `/etc/kubeconfig` — it holds no secret, since auth is an exec call to
+    `aws eks get-token` using the instance role — and `/etc/profile.d/kube.sh`
+    points `KUBECONFIG` at it, adds `k` as an alias and wires up completion. SSM
+    sessions run as `ssm-user`, so a kubeconfig under `/root` would have been
+    invisible to them.
   - **Failures are loud.** An earlier version wrapped the download in a bare `if`
     that discarded the error, so a broken install looked exactly like a working
-    one — which is why it went unnoticed for so long. Every path now names what to
-    check, and `install-kubectl` stays on the host to re-run once the bucket is
-    seeded.
+    one — which is why it went unnoticed for so long.
   - `user_data_replace_on_change` forces a new instance whenever the boot script
     changes: it runs once, so without this the code and the running host drift
     apart in silence.
