@@ -12,3 +12,9 @@ variable "foundation_state_key" {
   type        = string
   description = "Foundation layer state key (e.g. foundation/hml/terraform.tfstate)"
 }
+
+variable "argocd_chart_version" {
+  type        = string
+  description = "argo-cd Helm chart version. Chart 10.4.0 ships Argo CD v3.5.1."
+  default     = "10.4.0"
+}

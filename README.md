@@ -27,7 +27,7 @@ GitHub Actions CI/CD pipeline.
                          └─────────────────────────────────────────────┘
 
   foundation/  ──(terraform_remote_state)──▶  workload/
-  network, EKS, KMS, OIDC, nodes, bastion       AWS Load Balancer Controller (IRSA + Helm)
+  network, EKS, KMS, OIDC, nodes, bastion       ALB Controller (IRSA + Helm) + Argo CD
 ```
 
 ## Layers
@@ -36,7 +36,7 @@ GitHub Actions CI/CD pipeline.
 |--------------|----------------------------------------------------------------------------------|--------------------------------------|
 | `bootstrap`  | One-time per account: KMS-encrypted S3 **state bucket** + GitHub Actions **OIDC roles** | local state — **not** committed (`*.tfstate` is gitignored) |
 | `foundation` | VPC, subnets, NAT/IGW, EKS, KMS, OIDC, managed node group, bastion, VPC endpoints, core add-ons (vpc-cni/coredns/kube-proxy) | `foundation/<env>/terraform.tfstate` |
-| `workload`   | Cluster add-ons — today the AWS Load Balancer Controller (IRSA + Helm)            | `workload/<env>/terraform.tfstate`   |
+| `workload`   | Cluster add-ons — AWS Load Balancer Controller (IRSA + Helm) and Argo CD          | `workload/<env>/terraform.tfstate`   |
 
 `bootstrap` runs once to create the backend the other layers use. The `workload`
 layer reads `foundation` outputs through `terraform_remote_state`, so
@@ -210,7 +210,7 @@ foundation/
 workload/
   main.tf  provider.tf  variables.tf  backend.tf  README.md
   environments/{hml,prod}/{terraform.tfvars,backend.hcl}
-  modules/aws-load-balancer-controller/
+  modules/{aws-load-balancer-controller,argocd}/
 .github/workflows/        # plan, test, security-scan, deploy, destroy
 .trivyignore              # documented, accepted Trivy exceptions
 ARCHITECTURE.md
