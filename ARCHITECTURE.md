@@ -144,6 +144,13 @@ through `terraform_remote_state`.
   over PrivateLink — the bastion never needs internet.
 - **Tooling without internet.** `kubectl` is fetched from the Amazon-EKS S3
   bucket through the gateway endpoint (build date auto-discovered, no `curl`).
+  The role carries a read grant scoped to that one bucket — it was missing
+  originally, so the boot script failed with `AccessDenied` and, because the
+  failure was swallowed by a bare `if`, kubectl was simply absent with nothing in
+  the log explaining why. The script now logs every failure path, and
+  `user_data_replace_on_change` forces a new instance whenever the script changes:
+  boot scripts only run once, so without it the code and the running host drift
+  apart silently.
   Helm is intentionally absent — Helm releases are managed by the `workload`
   layer's provider (see §7), not imperatively on a host.
 - **Dual authorization model, deliberately separated:**
