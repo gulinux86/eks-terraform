@@ -22,6 +22,11 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # TEMPORARY — negative test for the Environment branch policy (task 6.2).
+    # This branch is not `master`, so GitHub must refuse to start this job and
+    # issue no OIDC token. If the job runs, the branch policy is not in effect
+    # and the plan/deploy role split protects nothing. REVERT THIS BRANCH AFTER.
+    environment: hml
     strategy:
       fail-fast: false
       matrix:
