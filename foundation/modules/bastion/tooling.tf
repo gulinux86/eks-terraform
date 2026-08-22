@@ -13,6 +13,12 @@
 resource "aws_s3_bucket" "tooling" {
   bucket = "${var.project_name}-tooling-${data.aws_caller_identity.current.account_id}"
 
+  # S3 refuses to delete a non-empty bucket, so without this a `terraform destroy`
+  # fails with BucketNotEmpty and leaves the environment half torn down. Safe here
+  # and only here: the contents are a binary the pipeline re-downloads and re-seeds
+  # on every deploy. Never set this on the state bucket.
+  force_destroy = true
+
   tags = merge(
     var.tags,
     {
