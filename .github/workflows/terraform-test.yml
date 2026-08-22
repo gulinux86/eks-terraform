@@ -20,6 +20,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The foundation -> workload output contract. workload/ reads foundation outputs
+  # through terraform_remote_state, a link that exists only at run time: renaming or
+  # deleting an output passes fmt, validate, the module suites and Trivy, and fails
+  # during a workload apply. Name-level check only — no credentials, no providers,
+  # no state. See ARCHITECTURE.md §9.
+  contract:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # credential-free
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - name: Check layer output contract
+        run: ./scripts/check-layer-contract.sh
+
   test:
     runs-on: ubuntu-latest
     strategy:

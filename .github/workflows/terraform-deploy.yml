@@ -54,6 +54,18 @@ jobs:
           terraform -chdir=${{ matrix.module }} init -input=false -backend=false
           terraform -chdir=${{ matrix.module }} test -no-color
 
+  # Gate 1b — the foundation -> workload output contract. Credential-free.
+  contract:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - name: Check layer output contract
+        run: ./scripts/check-layer-contract.sh
+
   # Gate 2 — Trivy IaC misconfiguration scan. Fails on HIGH/CRITICAL using the
   # committed .trivyignore. Same scan for hml and prod. No SARIF upload here
   # (that runs on PRs); this is a hard pre-apply gate.
@@ -76,7 +88,7 @@ jobs:
           exit-code: "1"
 
   deploy:
-    needs: [test, security] # apply only after both gates pass
+    needs: [test, contract, security] # apply only after every gate passes
     runs-on: ubuntu-latest
     # Ties to the GitHub Environment: `prod` carries the required reviewer, so a
     # prod run pauses for approval before this job starts.

@@ -4,7 +4,7 @@ variable "project_name" {
 }
 
 variable "tags" {
-  type        = map(any)
+  type        = map(string)
   description = "Tags to be added to AWS resources"
 }
 
@@ -28,6 +28,11 @@ variable "instance_types" {
   type        = list(string)
   description = "EC2 instance types for the node group"
   default     = ["t3.medium"]
+
+  validation {
+    condition     = length(var.instance_types) > 0
+    error_message = "instance_types must list at least one EC2 instance type."
+  }
 }
 
 variable "ami_type" {
@@ -40,6 +45,14 @@ variable "desired_size" {
   type        = number
   description = "Desired number of nodes"
   default     = 2
+
+  # Cross-variable validation (Terraform >= 1.9). AWS rejects an incoherent scaling
+  # config, but only once it is creating the node group — after the VPC, cluster and
+  # IAM roles are already built.
+  validation {
+    condition     = var.desired_size >= var.min_size && var.desired_size <= var.max_size
+    error_message = "node sizing must satisfy min_size <= desired_size <= max_size."
+  }
 }
 
 variable "min_size" {

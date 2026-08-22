@@ -9,7 +9,7 @@ variable "kubernetes_version" {
 }
 
 variable "tags" {
-  type        = map(any)
+  type        = map(string)
   description = "Tags applied to the add-ons"
 }
 
