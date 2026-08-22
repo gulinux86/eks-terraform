@@ -61,4 +61,16 @@ run "secure_defaults_and_access_entries" {
     ])
     error_message = "admin associations must use AmazonEKSClusterAdminPolicy"
   }
+
+  # The control-plane log group must be OURS. Left to EKS, it is created with no
+  # expiry and audit logs accumulate forever — and Terraform cannot set retention on
+  # a group it does not own. The name must match exactly what EKS writes to.
+  assert {
+    condition     = aws_cloudwatch_log_group.cluster.name == "/aws/eks/${var.project_name}-cluster/cluster"
+    error_message = "log group name must be exactly /aws/eks/<cluster-name>/cluster, or EKS creates its own and this one goes unused"
+  }
+  assert {
+    condition     = aws_cloudwatch_log_group.cluster.retention_in_days > 0
+    error_message = "the control-plane log group must set a retention period, never leave it to the never-expire default"
+  }
 }
