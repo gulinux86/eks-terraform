@@ -17,6 +17,21 @@
 resource "aws_launch_template" "nodes" {
   name_prefix = "${var.project_name}-node-"
 
+  # Declaring a launch template means EKS stops supplying its own metadata
+  # defaults, so they have to be restated here or the nodes silently fall back to
+  # IMDSv1-permitted. These values are exactly what EKS was already applying
+  # (verified against the running nodes), so this changes no behaviour — it only
+  # makes the setting visible and reviewed.
+  #
+  # hop limit 1 is the security-relevant part: a packet from a pod on the pod
+  # network needs two hops to reach IMDS, so this keeps pods away from the node's
+  # instance credentials. Workloads get AWS access through IRSA instead (§7).
+  metadata_options {
+    http_tokens                 = "required" # IMDSv2 only
+    http_endpoint               = "enabled"
+    http_put_response_hop_limit = 1
+  }
+
   tag_specifications {
     resource_type = "instance"
     tags = merge(
