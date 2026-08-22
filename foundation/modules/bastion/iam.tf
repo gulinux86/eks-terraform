@@ -47,6 +47,39 @@ resource "aws_iam_role_policy" "bastion_eks_describe" {
   })
 }
 
+# Read access to the public Amazon-EKS bucket, which is where the boot script gets
+# kubectl from (via the S3 gateway endpoint — the bastion has no internet egress).
+#
+# This was missing: the role carried only SSM and eks:DescribeCluster, so the boot
+# script's `aws s3 ls` returned AccessDenied, the guard around it swallowed the
+# failure, and kubectl was silently never installed. The documented behaviour in
+# ARCHITECTURE.md §6 had therefore never actually worked.
+#
+# Scoped to that one bucket. `amazon-eks` is public and read-only to everyone, so
+# this grants no meaningful reach — but scoping it keeps the role's intent legible.
+resource "aws_iam_role_policy" "bastion_kubectl_download" {
+  name = "${var.project_name}-bastion-kubectl-download"
+  role = aws_iam_role.bastion_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ListAmazonEKSBucket"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = "arn:aws:s3:::amazon-eks"
+      },
+      {
+        Sid      = "DownloadKubectlBinary"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = "arn:aws:s3:::amazon-eks/*"
+      }
+    ]
+  })
+}
+
 resource "aws_iam_instance_profile" "bastion_profile" {
   name = "${var.project_name}-bastion-profile"
   role = aws_iam_role.bastion_role.name

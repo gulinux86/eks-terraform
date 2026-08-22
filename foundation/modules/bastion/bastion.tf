@@ -85,19 +85,44 @@ resource "aws_instance" "bastion" {
   # intentionally NOT installed here: Helm releases run in the workload/CI layer
   # (see ARCHITECTURE.md §7). The kubectl step is best-effort — a failure must
   # not break boot.
+  # Failures here are logged loudly, never swallowed. The previous version wrapped
+  # the download in a bare `if` that discarded the error, so a missing IAM
+  # permission looked identical to success — kubectl was simply absent, with
+  # nothing in the log saying why. Boot still continues on failure (a bastion
+  # without kubectl is degraded, not useless), but it says so.
   user_data = <<-EOF
     #!/bin/bash
-    set -euo pipefail
+    set -uo pipefail
 
     KVER="${var.kubectl_version}"
-    if KDATE=$(aws s3 ls "s3://amazon-eks/$KVER/" | awk '{print $2}' | tr -d / | sort | tail -1) && [ -n "$KDATE" ]; then
-      aws s3 cp "s3://amazon-eks/$KVER/$KDATE/bin/linux/amd64/kubectl" /usr/local/bin/kubectl
+    KURL="s3://amazon-eks/$KVER"
+
+    echo "[kubectl] resolving latest build under $KURL/"
+    if ! KDATE=$(aws s3 ls "$KURL/" 2>&1 | awk '{print $2}' | tr -d / | sort | tail -1); then
+      echo "[kubectl] FAILED to list $KURL/ — check the bastion role has s3:ListBucket on arn:aws:s3:::amazon-eks" >&2
+    elif [ -z "$KDATE" ]; then
+      echo "[kubectl] FAILED: no builds found under $KURL/ — is kubectl_version ($KVER) a full x.y.z version?" >&2
+    elif ! aws s3 cp "$KURL/$KDATE/bin/linux/amd64/kubectl" /usr/local/bin/kubectl; then
+      echo "[kubectl] FAILED to download — check s3:GetObject on arn:aws:s3:::amazon-eks/*" >&2
+    else
       chmod 0755 /usr/local/bin/kubectl
+      echo "[kubectl] installed $KVER build $KDATE at /usr/local/bin/kubectl"
+      /usr/local/bin/kubectl version --client || true
     fi
 
-    # kubeconfig for the private cluster
-    aws eks update-kubeconfig --region ${var.region} --name ${var.cluster_name} --kubeconfig /root/.kube/config || true
+    # kubeconfig for root; interactive SSM sessions run as ssm-user and should run
+    # `aws eks update-kubeconfig` themselves, since each user has their own HOME.
+    if aws eks update-kubeconfig --region ${var.region} --name ${var.cluster_name} --kubeconfig /root/.kube/config; then
+      echo "[kubeconfig] written to /root/.kube/config"
+    else
+      echo "[kubeconfig] FAILED — check eks:DescribeCluster on the bastion role" >&2
+    fi
   EOF
+
+  # Changing the boot script must replace the instance: user_data only runs on
+  # first boot, so without this a fixed script would sit in the config while the
+  # running bastion kept the old, broken one.
+  user_data_replace_on_change = true
 
   tags = merge(
     var.tags,
