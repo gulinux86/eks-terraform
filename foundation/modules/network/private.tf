@@ -8,6 +8,11 @@ resource "aws_subnet" "eks_subnet_private_1a" {
     {
       Name                              = "${var.project_name}-private_1a"
       "kubernetes.io/role/internal-elb" = 1
+
+      # Karpenter finds where to launch by tag, not by configuration. An
+      # EC2NodeClass selects subnets with this key; without it Karpenter reports
+      # that no subnets matched and provisions nothing.
+      "karpenter.sh/discovery" = "${var.project_name}-cluster"
     }
   )
 }
@@ -23,6 +28,11 @@ resource "aws_subnet" "eks_subnet_private_1b" {
     {
       Name                              = "${var.project_name}-private_1b"
       "kubernetes.io/role/internal-elb" = 1
+
+      # Karpenter finds where to launch by tag, not by configuration. An
+      # EC2NodeClass selects subnets with this key; without it Karpenter reports
+      # that no subnets matched and provisions nothing.
+      "karpenter.sh/discovery" = "${var.project_name}-cluster"
     }
   )
 }

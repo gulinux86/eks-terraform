@@ -61,3 +61,20 @@ output "kubectl_version" {
   value       = module.bastion.kubectl_version
   description = "kubectl version the bastion expects; the deploy workflow seeds this exact build."
 }
+
+# Consumed by the platform GitOps repository's Karpenter manifests. None of these
+# are secrets; they are the handful of AWS names the in-cluster objects must match.
+output "karpenter_node_role_name" {
+  value       = module.karpenter.node_role_name
+  description = "Role name for the EC2NodeClass's `role` field"
+}
+
+output "karpenter_interruption_queue" {
+  value       = module.karpenter.interruption_queue_name
+  description = "Queue name for the Helm chart's settings.interruptionQueue"
+}
+
+output "karpenter_discovery_tag_value" {
+  value       = module.karpenter.discovery_tag_value
+  description = "Value the EC2NodeClass subnet and security-group selectors must match on karpenter.sh/discovery"
+}

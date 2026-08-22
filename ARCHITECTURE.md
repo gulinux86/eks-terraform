@@ -141,8 +141,33 @@ through `terraform_remote_state`.
 - Sizing via variables (`desired/min/max`, `instance_types`), default
   `t3.medium`, 1–4 nodes.
   - **Trade-off:** managed node groups are simpler and AWS-maintained but less
-    flexible than self-managed ASGs or Karpenter. For a platform baseline,
-    simplicity wins; Karpenter would be the next step for real workload scaling.
+    flexible than self-managed ASGs or Karpenter.
+  - **The node group is the system pool, and stays.** Karpenter runs in pods and
+    cannot host itself, so something must exist before it does. Its AWS-side
+    prerequisites live in `modules/karpenter`; the controller, NodePools and
+    EC2NodeClasses are delivered by Argo CD from the platform GitOps repository —
+    Terraform provides only what Kubernetes cannot create for itself:
+    - **An Access Entry of type `EC2_LINUX`** for the node role. A role gets an
+      instance into the *account*; joining the *cluster* needs this entry, and it
+      is a different type from the `STANDARD` entries used for human and CI
+      principals. EKS creates it automatically for managed node groups, which is
+      why nothing needed it before. Without it, Karpenter's instances boot, look
+      healthy in EC2, and never become Kubernetes nodes.
+    - **`karpenter.sh/discovery` tags** on the private subnets and the cluster
+      security group. Karpenter finds where to launch by tag, not by
+      configuration; an unmatched selector provisions nothing and says only that
+      nothing matched.
+    - **An SQS interruption queue fed by EventBridge.** Karpenter works without
+      it, which is the trap — the gap only appears during a Spot reclaim, when the
+      node vanishes and its pods are killed rather than drained.
+    - **Pod Identity, not IRSA**, for the controller. The chart comes from Git, and
+      IRSA would require the role ARN in a values file, hardcoded per account. Pod
+      Identity binds role to ServiceAccount from the AWS side, so nothing crosses
+      the boundary. It needs the `eks-pod-identity-agent` add-on: without it the
+      association exists and silently delivers no credentials.
+    - The controller's `iam:PassRole` names one role and `TerminateInstances` is
+      conditioned on the discovery tag — unscoped, either would let the controller
+      launch instances carrying any role, or terminate the bastion.
   - **Instance `Name` tags come from a launch template.** Nothing else applies them
     at launch: `tags` on `aws_eks_node_group` land on the node group, and an
     `aws_autoscaling_group_tag` can only be created *after* the node group exists —
