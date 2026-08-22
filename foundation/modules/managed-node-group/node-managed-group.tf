@@ -20,6 +20,14 @@ resource "aws_eks_node_group" "eks_managed_node_group" {
     min_size     = var.min_size
   }
 
+  # Explicit rather than inherited, so the roll strategy is a reviewed choice.
+  # Stated plainly: at desired_size = 1 (hml) one unavailable node is the whole
+  # cluster, so this expresses intent and delivers no availability. It becomes
+  # meaningful once the group has 2+ nodes and workloads carry PodDisruptionBudgets.
+  update_config {
+    max_unavailable = 1
+  }
+
   depends_on = [
     aws_iam_role_policy_attachment.eks_managed_role_attachment_worker,
     aws_iam_role_policy_attachment.eks_managed_role_attachment_ecr,

@@ -1,3 +1,21 @@
+# EKS writes control-plane logs to /aws/eks/<cluster>/cluster. If the group does not
+# exist, EKS creates it with NO expiry — and Terraform cannot set retention on a group
+# it does not own. Creating it first, with the exact name, means EKS adopts this one.
+#
+# The cluster does not reference this resource, so Terraform has no ordering to infer:
+# the dependency below is explicit on purpose.
+resource "aws_cloudwatch_log_group" "cluster" {
+  name              = "/aws/eks/${var.project_name}-cluster/cluster"
+  retention_in_days = var.log_retention_days
+
+  tags = merge(
+    var.tags,
+    {
+      Name = "${var.project_name}-cluster-logs"
+    }
+  )
+}
+
 resource "aws_eks_cluster" "eks_cluster" {
   name     = "${var.project_name}-cluster"
   role_arn = aws_iam_role.eks_cluster_role.arn
@@ -30,7 +48,10 @@ resource "aws_eks_cluster" "eks_cluster" {
   # Otherwise, EKS will not be able to properly delete EKS managed EC2 infrastructure such as Security Groups.
   depends_on = [
     aws_iam_role_policy_attachment.eks_cluster_role_attachment,
-    aws_iam_role_policy.eks_kms
+    aws_iam_role_policy.eks_kms,
+    # Must exist before the cluster enables logging, or EKS creates its own
+    # never-expiring group and this one is left unused.
+    aws_cloudwatch_log_group.cluster
   ]
 
   tags = merge(
