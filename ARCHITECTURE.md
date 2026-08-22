@@ -162,9 +162,19 @@ through `terraform_remote_state`.
     principal lacked — it already holds `AdministratorAccess` and could add the
     entry by hand — but it records the grant in code instead of a click that
     disappears on the next rebuild.
-  - **Not for prod.** A human IAM user with standing cluster-admin is an audit
-    finding waiting to happen. Production should grant a role assumed for a
-    session, not a long-lived user. See §11.
+  - **The account root is also listed in hml**, because that is the identity
+    actually signed into the console: `terra-admin` holds access keys but has no
+    console login. EKS **does** accept `arn:aws:iam::<account>:root` as an
+    access-entry principal — verified against the API rather than assumed, after an
+    earlier reading of the docs suggested otherwise. The input validation was
+    widened to match reality.
+  - **Not for prod — neither of them.** A human IAM user with standing
+    cluster-admin is an audit finding waiting to happen, and root is worse: it
+    cannot be scoped, cannot be restricted by IAM policy, and cannot be attributed
+    to a person, so every action it takes is logged as "the account". In hml that
+    trade is acceptable — the environment is destroyed between sessions and holds
+    nothing real. Production should grant a **role assumed for a session** and give
+    the operator a console login of their own with MFA. See §11.
 - **Trade-off:** the bastion is an extra always-on `t3.micro` and an operational
   hop. The benefit is zero inbound exposure, no internet egress, and full Session
   Manager audit logging vs. an SSH bastion with a public IP and key management.
@@ -294,6 +304,6 @@ additionally narrow `public_access_cidrs` from the default `0.0.0.0/0`.
 | Cluster add-ons | ALB controller (IRSA + Helm) | + External Secrets, cert-manager, ExternalDNS, EBS-CSI, metrics-server, policy agents |
 | State bucket | Single shared bucket (KMS CMK) | Per-account/per-env buckets + bucket policies |
 | CI deploy role | Split from the plan role; `AdministratorAccess` | Custom policy sized to the managed services + permission boundary |
-| Human cluster access | hml lists an IAM **user** as cluster-admin so the console Resources tab works | A role assumed for a session; no standing cluster-admin on a long-lived user |
+| Human cluster access | hml lists an IAM **user** and the **account root** as cluster-admin so the console works | A role assumed for a session; operator console login with MFA; no root in daily use and no standing cluster-admin on a long-lived principal |
 | Prod approval | Reviewer approves before the job starts | Split deploy into plan → approve-with-plan → apply |
 ```

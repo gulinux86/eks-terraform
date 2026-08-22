@@ -110,8 +110,11 @@ variable "cluster_admin_role_arns" {
   }
 
   validation {
-    condition     = alltrue([for a in var.cluster_admin_role_arns : can(regex("^arn:aws[a-z-]*:iam::\\d{12}:(role|user)/", a))])
-    error_message = "each cluster_admin_role_arns entry must be an IAM role or user ARN, e.g. arn:aws:iam::123456789012:role/my-role."
+    # The account root (`...:root`, no trailing path) is accepted deliberately.
+    # An earlier version of this rule allowed only role/ and user/ on the
+    # assumption that EKS rejects root as an access-entry principal — it does not.
+    condition     = alltrue([for a in var.cluster_admin_role_arns : can(regex("^arn:aws[a-z-]*:iam::\\d{12}:((role|user)/.+|root)$", a))])
+    error_message = "each cluster_admin_role_arns entry must be an IAM role ARN, user ARN, or the account root ARN (arn:aws:iam::123456789012:root)."
   }
 }
 
