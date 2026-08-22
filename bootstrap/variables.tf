@@ -51,7 +51,7 @@ variable "deploy_policy_arn" {
 }
 
 variable "tags" {
-  type        = map(any)
+  type        = map(string)
   description = "Tags applied to the created IAM resources"
   default = {
     Project   = "eks"

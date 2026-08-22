@@ -89,9 +89,21 @@ through `terraform_remote_state`.
 - **Secrets envelope encryption with KMS.** Customer-managed key with rotation;
   the cluster role gets a scoped `kms:*` policy on that key only.
 - **Control-plane logging** enabled for all five log types (api, audit,
-  authenticator, controllerManager, scheduler).
+  authenticator, controllerManager, scheduler), written to a **Terraform-managed
+  log group with a 90-day retention**.
   - **Trade-off:** full audit logging has a CloudWatch cost; it's on because
     observability/forensics is a Senior+ expectation.
+  - **Why the log group is declared here.** EKS writes to
+    `/aws/eks/<cluster>/cluster` and, if that group does not exist, creates it
+    itself with **no expiry** — and Terraform cannot set retention on a group it
+    does not own. So the group is created first, with the exact name, and the
+    cluster depends on it explicitly (the cluster resource does not reference it,
+    so there is no ordering for Terraform to infer). The choice is 90 days: a
+    forensic window that still bounds cost. The real alternative was never "some
+    other number", it was an accidental infinity.
+  - **Hazard:** if a cluster previously existed in the account, the log group
+    outlived it and the apply fails with `ResourceAlreadyExistsException`. Remedy
+    is `terraform import` — deleting the group would discard audit history.
 - **Authentication mode `API_AND_CONFIG_MAP`** so we can use modern **Access
   Entries** while remaining compatible with anything still reading the aws-auth
   ConfigMap.
@@ -220,6 +232,17 @@ through `terraform_remote_state`.
   so it runs on PRs from any branch/fork. Guards security-critical invariants
   (subnet LB tagging, private endpoint, auth mode, secrets encryption, admin
   access entries).
+- `contract`: guards the **`foundation` → `workload` output contract**. The workload
+  layer reads seven foundation outputs through `terraform_remote_state`, a link that
+  exists only at run time — renaming or deleting one passes `fmt`, `validate`, every
+  module suite and Trivy, and fails during a `workload` apply. The check compares the
+  outputs referenced under `workload/` against those declared in
+  `foundation/outputs.tf`; no credentials, no providers, no state
+  (`scripts/check-layer-contract.sh`, also a pre-apply gate in `terraform-deploy`).
+  - **What it does not catch:** names only. An output that keeps its name and
+    changes meaning or type still passes. Guarding that would mean a typed interface
+    between the layers, not a name check — stated so the guard is not mistaken for
+    more than it is.
 - `security-scan`: **Trivy** IaC scan in `config` mode. Uploads SARIF to the
   Security tab and fails the build on HIGH/CRITICAL; reviewed exceptions live in
   `.trivyignore`.

@@ -16,6 +16,7 @@ module "eks_cluster" {
   endpoint_public_access = var.endpoint_public_access
   public_access_cidrs    = var.public_access_cidrs
   admin_role_arns        = var.cluster_admin_role_arns
+  log_retention_days     = var.log_retention_days
 }
 
 module "eks_managed-node-group" {
