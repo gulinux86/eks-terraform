@@ -8,7 +8,7 @@
 # Resolve the latest add-on version compatible with the cluster's Kubernetes
 # version (used unless a version is pinned explicitly via the *_version vars).
 data "aws_eks_addon_version" "this" {
-  for_each           = toset(["vpc-cni", "coredns", "kube-proxy", "metrics-server", "aws-ebs-csi-driver"])
+  for_each           = toset(["vpc-cni", "coredns", "kube-proxy", "metrics-server", "aws-ebs-csi-driver", "eks-pod-identity-agent"])
   addon_name         = each.key
   kubernetes_version = var.kubernetes_version
   most_recent        = true
@@ -28,6 +28,10 @@ locals {
     # forever, so nothing stateful can run. Unlike the others it needs an IAM
     # role to create and attach volumes — see iam.tf.
     "aws-ebs-csi-driver" = var.ebs_csi_version != null ? var.ebs_csi_version : data.aws_eks_addon_version.this["aws-ebs-csi-driver"].version
+
+    # eks-pod-identity-agent: the node-side half of EKS Pod Identity. Without it an
+    # association exists in AWS and delivers no credentials to the pod.
+    "eks-pod-identity-agent" = var.pod_identity_agent_version != null ? var.pod_identity_agent_version : data.aws_eks_addon_version.this["eks-pod-identity-agent"].version
   }
 }
 

@@ -53,3 +53,9 @@ variable "enable_ebs_csi" {
   description = "Create the EBS CSI driver add-on and its IAM role. On by default: without it no PersistentVolumeClaim can ever bind."
   default     = true
 }
+
+variable "pod_identity_agent_version" {
+  type        = string
+  description = "Pin the eks-pod-identity-agent add-on version. Null resolves the latest compatible with kubernetes_version."
+  default     = null
+}

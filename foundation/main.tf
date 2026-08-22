@@ -68,3 +68,19 @@ module "eks_addons" {
 
   depends_on = [module.eks_managed-node-group]
 }
+
+# Karpenter's AWS-side prerequisites. The controller itself, its NodePools and
+# EC2NodeClasses are delivered by Argo CD from the platform GitOps repository —
+# what lives here is only what Kubernetes cannot create: IAM, the interruption
+# queue, and the access entry that lets Karpenter's nodes join the cluster.
+#
+# The managed node group stays. Karpenter runs in pods and cannot host itself, so
+# something has to exist before it does; the node group is that system pool, which
+# is what its name has claimed all along.
+module "karpenter" {
+  source       = "./modules/karpenter"
+  project_name = var.project_name
+  cluster_name = module.eks_cluster.cluster_name
+  cluster_arn  = module.eks_cluster.cluster_arn
+  tags         = var.tags
+}

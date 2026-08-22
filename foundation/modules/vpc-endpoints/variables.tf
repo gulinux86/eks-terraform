@@ -46,6 +46,7 @@ variable "interface_services" {
     "elasticloadbalancing", # AWS Load Balancer Controller
     "autoscaling",          # cluster/node autoscaling
     "logs",                 # CloudWatch Logs (control plane / apps)
+    "sqs",                  # Karpenter polls its interruption queue
     "ssm",                  # Session Manager (bastion)
     "ssmmessages",          # Session Manager data channel
     "ec2messages"           # SSM agent control channel
