@@ -32,6 +32,16 @@ max_size       = 2
 cluster_admin_role_arns = [
   "arn:aws:iam::889384902110:role/github-actions-eks-deploy",
   "arn:aws:iam::889384902110:user/terra-admin",
+  # The account root, because that is the identity signed into the console today
+  # (terra-admin has access keys but no console login). EKS does accept root as an
+  # access-entry principal — verified against the API, not assumed. Without this the
+  # console's Resources and Compute tabs return Unauthorized: listing Kubernetes
+  # objects goes through RBAC, where being an AWS administrator counts for nothing.
+  #
+  # hml only. Root cannot be scoped, restricted or attributed to a person, so this
+  # is a convenience that trades away auditability — acceptable in a demo
+  # environment that is destroyed between sessions, not in production. See §6/§11.
+  "arn:aws:iam::889384902110:root",
 ]
 
 tags = {
