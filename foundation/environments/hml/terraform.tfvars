@@ -20,13 +20,7 @@ max_size       = 2
 # register separate from IAM. The read-only *plan* role is deliberately absent:
 # it never talks to the cluster, which is why the workload plan runs with
 # -refresh=false (ARCHITECTURE.md §9).
-#
-# Both roles are listed during the cutover so a rollback to the legacy role keeps
-# working; the legacy entry is removed once the new roles are verified.
-cluster_admin_role_arns = [
-  "arn:aws:iam::889384902110:role/github-actions-eks-deploy",
-  "arn:aws:iam::889384902110:role/github-actions-eks-terraform", # legacy — remove after cutover
-]
+cluster_admin_role_arns = ["arn:aws:iam::889384902110:role/github-actions-eks-deploy"]
 
 tags = {
   Project     = "eks"
