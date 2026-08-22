@@ -131,6 +131,16 @@ through `terraform_remote_state`.
   - **Trade-off:** managed node groups are simpler and AWS-maintained but less
     flexible than self-managed ASGs or Karpenter. For a platform baseline,
     simplicity wins; Karpenter would be the next step for real workload scaling.
+  - **Instance `Name` tags come from the ASG, not the node group.** Tags set on
+    `aws_eks_node_group` land on the node group; EKS tags the instances only with
+    `eks:cluster-name` / `eks:nodegroup-name`, so they appear unnamed in the
+    console. An `aws_autoscaling_group_tag` with `propagate_at_launch` supplies the
+    name. The alternative — a custom launch template with `tag_specifications` —
+    tags instances immediately instead of on next launch, but means owning a launch
+    template whose version changes can cascade into node replacement. Not worth
+    that for a console label; revisit if a launch template is ever needed on its
+    own merits (custom kubelet args, a private AMI). Consequence: nodes already
+    running stay unnamed until replaced.
 
 ## 6. Access — bastion + SSM
 
