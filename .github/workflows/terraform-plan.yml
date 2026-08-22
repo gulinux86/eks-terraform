@@ -41,21 +41,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
 
-      # Manual dispatch → use the chosen environment; PR → infer from base branch.
+      # Manual dispatch → use the chosen environment. Pull requests always resolve
+      # to hml: `master` is the single source of truth for deploys, so there is no
+      # branch-per-environment mapping to infer from.
+      #
+      # Assumes the read-only PLAN role. This job runs on pull requests, whose
+      # workflow file comes from the PR's own branch — it must never hold a
+      # credential that can mutate AWS.
       - name: Select environment + role
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             ENV="${{ github.event.inputs.environment }}"
-          elif [ "${{ github.base_ref }}" = "main" ]; then
-            ENV="prod"
           else
             ENV="hml"
           fi
           echo "ENV_NAME=$ENV" >> "$GITHUB_ENV"
           if [ "$ENV" = "prod" ]; then
-            echo "AWS_ROLE_ARN=${{ secrets.PROD_AWS_ROLE_ARN }}" >> "$GITHUB_ENV"
+            echo "AWS_ROLE_ARN=${{ secrets.PROD_PLAN_ROLE_ARN }}" >> "$GITHUB_ENV"
           else
-            echo "AWS_ROLE_ARN=${{ secrets.HML_AWS_ROLE_ARN }}" >> "$GITHUB_ENV"
+            echo "AWS_ROLE_ARN=${{ secrets.HML_PLAN_ROLE_ARN }}" >> "$GITHUB_ENV"
           fi
 
       - name: Configure AWS credentials (OIDC)
@@ -107,7 +111,27 @@ jobs:
             fi
           fi
 
+          # The plan role is strictly read-only, which shapes both flags below.
+          #
+          # -lock=false: Terraform's S3 lock (use_lockfile) would make "read-only"
+          # write a .tflock object and use the state CMK to do it. Plan mutates
+          # nothing, so concurrent plans are harmless — dropping the lock buys a
+          # role with no write permission at all. Deploy keeps locking.
+          #
+          # -refresh=false (workload only): this layer manages two in-cluster
+          # resources (helm_release, kubernetes_service_account). Refreshing them
+          # means calling the Kubernetes API, authorized by an EKS Access Entry
+          # that the plan role deliberately does not have. Planning from stored
+          # state keeps the role out of the cluster. Trade-off: drift in those two
+          # resources will not show here; the deploy path's own refresh catches it
+          # before anything is applied. See ARCHITECTURE.md §9.
+          REFRESH_FLAG=""
+          if [ "${{ matrix.layer }}" = "workload" ]; then
+            REFRESH_FLAG="-refresh=false"
+          fi
+
           terraform -chdir=${{ matrix.layer }} plan -no-color -input=false \
+            -lock=false ${REFRESH_FLAG} \
             -var-file=environments/${{ env.ENV_NAME }}/terraform.tfvars \
             > /tmp/plan_output.txt 2>&1
           echo "exitcode=$?" >> "$GITHUB_OUTPUT"

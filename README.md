@@ -34,7 +34,7 @@ GitHub Actions CI/CD pipeline.
 
 | Layer        | Responsibility                                                                   | State                                |
 |--------------|----------------------------------------------------------------------------------|--------------------------------------|
-| `bootstrap`  | One-time per account: KMS-encrypted S3 **state bucket** + GitHub Actions **OIDC role** | local state (committed `terraform.tfstate`) |
+| `bootstrap`  | One-time per account: KMS-encrypted S3 **state bucket** + GitHub Actions **OIDC roles** | local state — **not** committed (`*.tfstate` is gitignored) |
 | `foundation` | VPC, subnets, NAT/IGW, EKS, KMS, OIDC, managed node group, bastion, VPC endpoints, core add-ons (vpc-cni/coredns/kube-proxy) | `foundation/<env>/terraform.tfstate` |
 | `workload`   | Cluster add-ons — today the AWS Load Balancer Controller (IRSA + Helm)            | `workload/<env>/terraform.tfstate`   |
 
@@ -98,12 +98,61 @@ kubectl get nodes
 | `terraform-deploy.yml`  | `workflow_dispatch` (env + layer)                | **Gated** by `terraform test` + Trivy, then `plan -out` + `apply` of the saved plan (`foundation`→`workload`); `prod` requires reviewer approval |
 | `terraform-destroy.yml` | `workflow_dispatch` (env + layer, typed confirm) | `destroy` (`workload` before `foundation` for `both`); `prod` requires reviewer approval |
 
-- AWS authentication via **OIDC** (no static keys).
-- Environment inferred from the base branch (`main` → prod, otherwise → hml) or chosen on dispatch.
+- AWS authentication via **OIDC** (no static keys), through **two roles split by
+  what the job does** — see [Pipeline access](#pipeline-access-two-roles) below.
+- `master` is the single deploy source. The environment is chosen on dispatch;
+  pull-request plans always resolve to `hml`. There is no branch per environment.
 - `prod` is protected by a GitHub Environment (required reviewer).
 - The PR checks above can optionally be promoted to **required status checks** on
   `master` (branch protection) to block merging when they fail — not enforced by
   default.
+
+### Pipeline access — two roles
+
+The workflows do very different things, so they get different credentials. A pull
+request runs the workflow file **from its own branch**, so the job that only needs
+to read must never hold a credential that can write.
+
+| Role | Trusted `sub` claim | Permission | Used by |
+|------|---------------------|------------|---------|
+| `github-actions-eks-plan` | `:pull_request`, `:ref:refs/heads/*` | read-only (+ `kms:Decrypt` on the state key) | `terraform-plan` |
+| `github-actions-eks-deploy` | `:environment:<env>` **only** | write | `terraform-deploy`, `terraform-destroy` |
+
+GitHub stamps the `environment:<name>` claim **only** for a job that declares an
+Environment — which the two write workflows do and the plan workflow does not.
+
+**The Environment's deployment-branch policy is load-bearing.** Restricted to
+`master`, GitHub refuses any other branch's job *before it starts*, so no token is
+ever issued. Without it, a pull request could add `environment: hml` to any job and
+mint the deploy claim itself, defeating the split. Required setup:
+
+| Environment | Deployment branches | Required reviewer |
+|---|---|---|
+| `hml` | `master` only | no — hml stays fast |
+| `prod` | `master` only | yes (`gulinux86`), **self-review allowed** |
+
+**Why self-review is allowed on `prod`:** the repository has a single maintainer.
+Disabling self-review with a one-person reviewer list would make production deploys
+impossible — the dispatcher would be the only reviewer and would be refused. What
+remains is a deliberate pause and an attributable approval, not four-eyes. Add a
+second reviewer and disable self-review the moment there is one.
+
+Authorization deliberately lives **outside** the pipeline. An allowlist checked as
+a workflow step would run after the credential was issued, and could be deleted by
+anyone able to edit the workflow — the same people it is meant to constrain.
+
+Required secrets, per account:
+
+```
+HML_PLAN_ROLE_ARN     HML_DEPLOY_ROLE_ARN
+PROD_PLAN_ROLE_ARN    PROD_DEPLOY_ROLE_ARN   (once the prod account exists)
+```
+
+Both come from `bootstrap` outputs (`plan_role_arn`, `deploy_role_arn`). Bootstrap
+is applied **once per account** with `-var environment=hml|prod`, from a
+workstation with administrator credentials — never through the pipeline. The deploy
+role must also appear in that environment's `cluster_admin_role_arns`, or
+`workload` applies lose in-cluster authorization.
 
 ### Quality gates — defense in depth
 

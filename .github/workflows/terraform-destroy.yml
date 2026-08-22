@@ -49,12 +49,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
 
+      # Assumes the write-capable DEPLOY role — same gate as terraform-deploy: the
+      # `environment:` declaration above is what mints the subject claim this role
+      # trusts, and the Environment's branch policy gates the job itself.
       - name: Select AWS role
         run: |
           if [ "$ENVIRONMENT" = "prod" ]; then
-            echo "AWS_ROLE_ARN=${{ secrets.PROD_AWS_ROLE_ARN }}" >> "$GITHUB_ENV"
+            echo "AWS_ROLE_ARN=${{ secrets.PROD_DEPLOY_ROLE_ARN }}" >> "$GITHUB_ENV"
           else
-            echo "AWS_ROLE_ARN=${{ secrets.HML_AWS_ROLE_ARN }}" >> "$GITHUB_ENV"
+            echo "AWS_ROLE_ARN=${{ secrets.HML_DEPLOY_ROLE_ARN }}" >> "$GITHUB_ENV"
           fi
 
       - name: Configure AWS credentials (OIDC)
