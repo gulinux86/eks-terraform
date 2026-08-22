@@ -30,3 +30,26 @@ variable "kube_proxy_version" {
   description = "Pin the kube-proxy add-on version. Null resolves the latest compatible with kubernetes_version."
   default     = null
 }
+
+variable "metrics_server_version" {
+  type        = string
+  description = "Pin the metrics-server add-on version. Null resolves the latest compatible with kubernetes_version."
+  default     = null
+}
+
+variable "ebs_csi_version" {
+  type        = string
+  description = "Pin the aws-ebs-csi-driver add-on version. Null resolves the latest compatible with kubernetes_version."
+  default     = null
+}
+
+variable "oidc_provider_arn" {
+  type        = string
+  description = "Cluster OIDC provider ARN, used to build the EBS CSI driver's IRSA trust policy."
+}
+
+variable "enable_ebs_csi" {
+  type        = bool
+  description = "Create the EBS CSI driver add-on and its IAM role. On by default: without it no PersistentVolumeClaim can ever bind."
+  default     = true
+}

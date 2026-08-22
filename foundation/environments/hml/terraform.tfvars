@@ -6,21 +6,27 @@ vpc_cni_version    = "v1.22.4-eksbuild.3"
 coredns_version    = "v1.13.2-eksbuild.11"
 kube_proxy_version = "v1.35.3-eksbuild.18"
 
-# Free-tier-eligible node (new-account Free Plan only allows these types).
-# t3.small = 2 vCPU / 2 GiB, x86_64 (matches the AL2023 x86_64 AMI).
+# Node sizing is driven by the VPC CNI's pod-per-node cap, which comes from ENI
+# capacity rather than CPU or memory:
 #
-# Two nodes, because of a hard limit rather than a preference. The VPC CNI caps
-# pods per node by ENI capacity, and a t3.small allows only 11 — measured, not
-# estimated. The cluster's own components (coredns ×2, kube-proxy, aws-node) plus
-# the load-balancer controller ×2 already occupy 6, leaving 5. Argo CD needs 7
-# pods (server, repo-server, application-controller, applicationset-controller,
-# notifications-controller, redis, dex), so on a single node two of them would sit
-# Pending forever. Raising the instance type would also work, but t3.small is what
-# the account's Free Plan allows.
-instance_types = ["t3.small"]
+#   t3.small         2 vCPU  2 GiB   3 ENIs x  4 IPs  ->  11 pods
+#   m7i-flex.large   2 vCPU  8 GiB   3 ENIs x 10 IPs  ->  29 pods
+#
+# Both are free-tier-eligible on a new account. t3.small was the original choice
+# and left the cluster artificially cramped: 11 slots per node, 6 taken by the
+# cluster's own components before anything of ours ran. Installing Argo CD alone
+# forced a second node.
+#
+# The platform ahead — Istio, Gateway API, an OTel collector, observability — needs
+# roughly 32 pods. Two t3.small give 22 slots and cannot hold it; two
+# m7i-flex.large give 58, with room for what comes after.
+#
+# Cost: m7i-flex.large is ~4.5x t3.small per hour. That is the honest price of the
+# capacity, and it is why the type is set per environment rather than defaulted.
+instance_types = ["m7i-flex.large"]
 desired_size   = 2
 min_size       = 1
-max_size       = 2
+max_size       = 3
 
 # IAM principals granted cluster-admin (the CI deploy role that runs Terraform,
 # so the workload layer's kubernetes/helm providers are authorized).

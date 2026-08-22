@@ -117,10 +117,22 @@ through `terraform_remote_state`.
     API server, surfacing as intermittent DNS/routing failures whose root cause is
     hard to trace. Managing them makes the version a reviewed part of the upgrade
     (the `1.34 → 1.35` bump in this repo updates them in the same change).
-  - **Deferred (production-hardening, intentionally not built for a 1–2 node
-    demo):** dedicated VPC-CNI IRSA role, native network policy
-    (`ENABLE_NETWORK_POLICY`), prefix delegation, and the EBS-CSI / metrics-server
-    add-ons — added when a workload actually needs them (see §11).
+  - **`metrics-server` and `aws-ebs-csi-driver` are managed here too.** Both close
+    gaps that fail silently rather than loudly: without metrics-server there is no
+    HPA and no `kubectl top`; without the EBS CSI driver every
+    PersistentVolumeClaim stays **Pending** forever, so nothing stateful can run —
+    and neither absence announces itself.
+    - The CSI driver is the only add-on that calls the AWS API (it creates,
+      attaches and deletes volumes), so it alone gets an IAM role, via IRSA scoped
+      to `kube-system:ebs-csi-controller-sa` and carrying the AWS-managed
+      `AmazonEBSCSIDriverPolicy`. A hand-written policy would drift from the
+      driver on every upgrade.
+    - IRSA rather than Pod Identity here, to match the pattern the ALB Controller
+      already uses. Pod Identity is the direction for new roles — it keeps the role
+      ARN off the Kubernetes object entirely, which matters once manifests move to
+      GitOps — and migrating this one later is contained.
+  - **Still deferred:** dedicated VPC-CNI IRSA role, native network policy
+    (`ENABLE_NETWORK_POLICY`) and prefix delegation (see §11).
 
 ## 5. Compute — managed node group
 
