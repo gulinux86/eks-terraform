@@ -79,54 +79,89 @@ resource "aws_instance" "bastion" {
     encrypted = true
   }
 
-  # kubectl comes from the in-region tooling bucket through the S3 gateway
-  # endpoint — no internet egress, and no cross-region request that the gateway
-  # endpoint cannot route (see tooling.tf for why that mattered).
+  # Everything the operator needs is set up at boot; a session should need nothing
+  # but `kubectl` (or `k`).
   #
-  # Boot may run before the pipeline has seeded the bucket, so the install is also
-  # written out as /usr/local/bin/install-kubectl and can be re-run at any time.
-  # Every failure path says what to check; the previous version swallowed errors,
-  # which is why a broken download looked exactly like a working one.
+  # The install has to survive an ordering it cannot control: the bastion is created
+  # during the foundation apply, while the tooling bucket is seeded by the pipeline
+  # *after* that apply finishes. So rather than try once and leave the operator to
+  # fix it, a systemd unit retries until the object appears and then stops. The
+  # machine converges on its own.
   #
-  # helm is intentionally NOT installed: Helm releases run in the workload layer,
-  # not by hand on a host (ARCHITECTURE.md §7).
+  # helm is intentionally absent: Helm releases run in the workload layer, not by
+  # hand on a host (ARCHITECTURE.md §7).
   user_data = <<-EOF
     #!/bin/bash
     set -uo pipefail
 
-    cat > /usr/local/bin/install-kubectl <<'SCRIPT'
+    BUCKET="${aws_s3_bucket.tooling.id}"
+    KVER="${var.kubectl_version}"
+    REGION="${var.region}"
+    CLUSTER="${var.cluster_name}"
+
+    # ---- installer: kubectl + a kubeconfig every user can read ----------------
+    cat > /usr/local/bin/setup-kube <<SCRIPT
     #!/bin/bash
-    # Installs kubectl from the project's in-region tooling bucket.
     set -uo pipefail
-    SRC="s3://__BUCKET__/kubectl/__KVER__/kubectl"
-    echo "[kubectl] fetching $SRC"
-    if aws s3 cp "$SRC" /usr/local/bin/kubectl; then
+    SRC="s3://$BUCKET/kubectl/$KVER/kubectl"
+
+    if [ ! -x /usr/local/bin/kubectl ]; then
+      echo "[kube] fetching \$SRC"
+      aws s3 cp "\$SRC" /usr/local/bin/kubectl || {
+        echo "[kube] kubectl not available yet at \$SRC" >&2
+        exit 1
+      }
       chmod 0755 /usr/local/bin/kubectl
-      echo "[kubectl] installed at /usr/local/bin/kubectl"
-      /usr/local/bin/kubectl version --client
-    else
-      echo "[kubectl] FAILED. Checks, in order:" >&2
-      echo "  1. is the object seeded?  aws s3 ls $SRC" >&2
-      echo "  2. does the bastion role allow s3:GetObject on that bucket?" >&2
-      echo "  3. is the S3 gateway endpoint on this subnet's route table?" >&2
-      exit 1
+      echo "[kube] kubectl installed"
+    fi
+
+    # World-readable on purpose: it holds no secret. Auth is an exec call to
+    # \`aws eks get-token\`, which uses the instance role — so this grants nothing
+    # a user on this host did not already have.
+    if [ ! -s /etc/kubeconfig ]; then
+      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" --kubeconfig /etc/kubeconfig || {
+        echo "[kube] update-kubeconfig failed; check eks:DescribeCluster" >&2
+        exit 1
+      }
+      chmod 0644 /etc/kubeconfig
+      echo "[kube] kubeconfig written to /etc/kubeconfig"
     fi
     SCRIPT
+    chmod 0755 /usr/local/bin/setup-kube
 
-    sed -i "s|__BUCKET__|${aws_s3_bucket.tooling.id}|; s|__KVER__|${var.kubectl_version}|" /usr/local/bin/install-kubectl
-    chmod 0755 /usr/local/bin/install-kubectl
+    # ---- retry until the bucket is seeded -------------------------------------
+    cat > /etc/systemd/system/setup-kube.service <<'UNIT'
+    [Unit]
+    Description=Install kubectl and a shared kubeconfig
+    After=network-online.target
+    Wants=network-online.target
 
-    # Best effort at boot. If the bucket is not seeded yet, this logs why and an
-    # operator can run install-kubectl later — boot is not blocked either way.
-    /usr/local/bin/install-kubectl || echo "[kubectl] not installed at boot; run 'sudo install-kubectl' once the bucket is seeded" >&2
+    [Service]
+    Type=oneshot
+    ExecStart=/usr/local/bin/setup-kube
+    Restart=on-failure
+    RestartSec=20
 
-    # kubeconfig for root; interactive SSM sessions run as ssm-user and should run
-    # `aws eks update-kubeconfig` themselves, since each user has their own HOME.
-    if aws eks update-kubeconfig --region ${var.region} --name ${var.cluster_name} --kubeconfig /root/.kube/config; then
-      echo "[kubeconfig] written to /root/.kube/config"
-    else
-      echo "[kubeconfig] FAILED — check eks:DescribeCluster on the bastion role" >&2
+    [Install]
+    WantedBy=multi-user.target
+    UNIT
+
+    systemctl daemon-reload
+    systemctl enable --now setup-kube.service || true
+
+    # ---- shell environment for every user -------------------------------------
+    # SSM sessions run as ssm-user, not root, so a kubeconfig under /root would be
+    # invisible. Pointing KUBECONFIG at the shared file is what lets a session run
+    # kubectl with no setup at all.
+    cat > /etc/profile.d/kube.sh <<'PROFILE'
+    export KUBECONFIG=/etc/kubeconfig
+    alias k=kubectl
+    if command -v kubectl >/dev/null 2>&1; then
+      source <(kubectl completion bash) 2>/dev/null || true
+      complete -o default -F __start_kubectl k 2>/dev/null || true
     fi
+    PROFILE
+    chmod 0644 /etc/profile.d/kube.sh
   EOF
 
   # Changing the boot script must replace the instance: user_data only runs on
