@@ -15,7 +15,18 @@ max_size       = 2
 
 # IAM principals granted cluster-admin (the CI deploy role that runs Terraform,
 # so the workload layer's kubernetes/helm providers are authorized).
-cluster_admin_role_arns = ["arn:aws:iam::889384902110:role/github-actions-eks-terraform"]
+#
+# Reaching the Kubernetes API is authorized here, by an EKS Access Entry — a
+# register separate from IAM. The read-only *plan* role is deliberately absent:
+# it never talks to the cluster, which is why the workload plan runs with
+# -refresh=false (ARCHITECTURE.md §9).
+#
+# Both roles are listed during the cutover so a rollback to the legacy role keeps
+# working; the legacy entry is removed once the new roles are verified.
+cluster_admin_role_arns = [
+  "arn:aws:iam::889384902110:role/github-actions-eks-deploy",
+  "arn:aws:iam::889384902110:role/github-actions-eks-terraform", # legacy — remove after cutover
+]
 
 tags = {
   Project     = "eks"

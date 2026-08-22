@@ -175,6 +175,43 @@ through `terraform_remote_state`.
 
 - **OIDC to AWS** — no long-lived access keys in GitHub. All actions are pinned
   to a commit SHA and run on Node 24 runtimes.
+- **Two roles, split on the read/write boundary.** GitHub stamps a `sub` claim
+  describing how a run was triggered; the trust policies split on it:
+
+  | Claim | Role | Permission |
+  |---|---|---|
+  | `:pull_request`, `:ref:refs/heads/*` | `…-eks-plan` | read-only + `kms:Decrypt` on the state key |
+  | `:environment:<env>` | `…-eks-deploy` | write |
+
+  - **Why it matters.** A pull request runs the workflow file *from its own
+    branch*. With one shared role — the previous design, trusting `repo:<repo>:*`
+    — the plan job carried a credential that could delete the account, reachable
+    without passing the deploy approval at all. The split removes the strong
+    credential from that path.
+  - **The Environment branch policy is part of the mechanism, not hygiene.** The
+    `environment:<name>` claim is minted for any job that declares an Environment,
+    and a pull request can add that line. Restricting each Environment to `master`
+    makes GitHub refuse such a job before it starts, so the claim is never issued.
+    This control lives in repository settings, so no `terraform test` or Trivy rule
+    can assert it — it is verified by an explicit negative test at cutover.
+  - **Authorization sits outside the pipeline.** An actor allowlist or token check
+    written as a workflow step runs *after* the credential exists, and is editable
+    by exactly the people it constrains. The gate must sit outside the thing it
+    guards.
+  - **The plan role holds no cluster access.** Reaching the Kubernetes API is
+    granted by an EKS Access Entry, separately from IAM. The plan role has none, so
+    the `workload` plan runs with `-refresh=false` and never contacts the cluster.
+    Trade-off: drift in the two in-cluster resources (`helm_release`,
+    `kubernetes_service_account`) does not surface in a PR plan; the deploy path's
+    own refresh catches it before anything is applied. Registering the plan role
+    read-only was rejected — Kubernetes' `view` role excludes Secrets, where Helm
+    keeps release metadata, and the next policy up permits mutation.
+  - **Known gap:** the deploy role still carries `AdministratorAccess`. Sizing a
+    custom policy for EKS is iterative, and was deferred rather than stall the part
+    that removes the exposure. See §11.
+  - **Known gap:** a `prod` reviewer approves *before* the job starts, so they
+    approve without seeing the plan. Splitting deploy into plan → approve → apply
+    would fix it; not done here.
 - `terraform-plan`: `fmt` + `validate` + `plan` on PRs (matrix over both layers),
   posting the plan as a PR comment. The `workload` plan is skipped when
   `foundation` has no outputs yet (greenfield/torn-down).
@@ -220,4 +257,6 @@ additionally narrow `public_access_cidrs` from the default `0.0.0.0/0`.
 | Core add-ons | vpc-cni/coredns/kube-proxy managed + pinned | + dedicated VPC-CNI IRSA, network policy, prefix delegation |
 | Cluster add-ons | ALB controller (IRSA + Helm) | + External Secrets, cert-manager, ExternalDNS, EBS-CSI, metrics-server, policy agents |
 | State bucket | Single shared bucket (KMS CMK) | Per-account/per-env buckets + bucket policies |
+| CI deploy role | Split from the plan role; `AdministratorAccess` | Custom policy sized to the managed services + permission boundary |
+| Prod approval | Reviewer approves before the job starts | Split deploy into plan → approve-with-plan → apply |
 ```
