@@ -19,12 +19,13 @@ variables {
   # Pin explicit versions so the test is deterministic and the addon_version
   # passes the provider's semver validation (the mocked data source returns a
   # non-semver placeholder). The version-resolution path is exercised at apply.
-  vpc_cni_version        = "v1.19.2-eksbuild.1"
-  coredns_version        = "v1.11.4-eksbuild.2"
-  kube_proxy_version     = "v1.35.0-eksbuild.2"
-  metrics_server_version = "v0.7.2-eksbuild.1"
-  ebs_csi_version        = "v1.44.0-eksbuild.1"
-  oidc_provider_arn      = "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"
+  vpc_cni_version            = "v1.19.2-eksbuild.1"
+  coredns_version            = "v1.11.4-eksbuild.2"
+  kube_proxy_version         = "v1.35.0-eksbuild.2"
+  metrics_server_version     = "v0.7.2-eksbuild.1"
+  ebs_csi_version            = "v1.44.0-eksbuild.1"
+  pod_identity_agent_version = "v1.3.4-eksbuild.1"
+  oidc_provider_arn          = "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"
   tags = {
     Project = "eks"
   }
@@ -35,15 +36,22 @@ run "core_addons_managed_and_pinned" {
 
   # Every add-on the platform depends on is declared.
   assert {
-    condition     = length(aws_eks_addon.this) == 5
-    error_message = "expected five managed add-ons"
+    condition     = length(aws_eks_addon.this) == 6
+    error_message = "expected six managed add-ons"
   }
   assert {
     condition = alltrue([
-      for n in ["vpc-cni", "coredns", "kube-proxy", "metrics-server", "aws-ebs-csi-driver"] :
+      for n in ["vpc-cni", "coredns", "kube-proxy", "metrics-server", "aws-ebs-csi-driver", "eks-pod-identity-agent"] :
       contains(keys(aws_eks_addon.this), n)
     ])
-    error_message = "vpc-cni, coredns, kube-proxy, metrics-server and aws-ebs-csi-driver must all be declared"
+    error_message = "every add-on the platform depends on must be declared"
+  }
+
+  # The pod identity agent is the node-side half of EKS Pod Identity: without it an
+  # association exists in AWS and quietly delivers no credentials to the pod.
+  assert {
+    condition     = contains(keys(aws_eks_addon.this), "eks-pod-identity-agent")
+    error_message = "eks-pod-identity-agent must be managed, or Pod Identity associations deliver nothing"
   }
 
   # metrics-server is what makes HPA and `kubectl top` possible at all; its
