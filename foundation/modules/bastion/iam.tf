@@ -65,16 +65,16 @@ resource "aws_iam_role_policy" "bastion_kubectl_download" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "ListAmazonEKSBucket"
+        Sid      = "ListToolingBucket"
         Effect   = "Allow"
         Action   = ["s3:ListBucket"]
-        Resource = "arn:aws:s3:::amazon-eks"
+        Resource = aws_s3_bucket.tooling.arn
       },
       {
-        Sid      = "DownloadKubectlBinary"
+        Sid      = "DownloadTooling"
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
-        Resource = "arn:aws:s3:::amazon-eks/*"
+        Resource = "${aws_s3_bucket.tooling.arn}/*"
       }
     ]
   })

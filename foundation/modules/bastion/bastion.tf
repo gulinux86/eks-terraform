@@ -79,36 +79,46 @@ resource "aws_instance" "bastion" {
     encrypted = true
   }
 
-  # kubectl is pulled from the Amazon-EKS S3 bucket through the S3 gateway
-  # endpoint using the aws CLI (no curl, no internet egress). The build date is
-  # discovered from the bucket so it never needs to be hardcoded. helm is
-  # intentionally NOT installed here: Helm releases run in the workload/CI layer
-  # (see ARCHITECTURE.md §7). The kubectl step is best-effort — a failure must
-  # not break boot.
-  # Failures here are logged loudly, never swallowed. The previous version wrapped
-  # the download in a bare `if` that discarded the error, so a missing IAM
-  # permission looked identical to success — kubectl was simply absent, with
-  # nothing in the log saying why. Boot still continues on failure (a bastion
-  # without kubectl is degraded, not useless), but it says so.
+  # kubectl comes from the in-region tooling bucket through the S3 gateway
+  # endpoint — no internet egress, and no cross-region request that the gateway
+  # endpoint cannot route (see tooling.tf for why that mattered).
+  #
+  # Boot may run before the pipeline has seeded the bucket, so the install is also
+  # written out as /usr/local/bin/install-kubectl and can be re-run at any time.
+  # Every failure path says what to check; the previous version swallowed errors,
+  # which is why a broken download looked exactly like a working one.
+  #
+  # helm is intentionally NOT installed: Helm releases run in the workload layer,
+  # not by hand on a host (ARCHITECTURE.md §7).
   user_data = <<-EOF
     #!/bin/bash
     set -uo pipefail
 
-    KVER="${var.kubectl_version}"
-    KURL="s3://amazon-eks/$KVER"
-
-    echo "[kubectl] resolving latest build under $KURL/"
-    if ! KDATE=$(aws s3 ls "$KURL/" 2>&1 | awk '{print $2}' | tr -d / | sort | tail -1); then
-      echo "[kubectl] FAILED to list $KURL/ — check the bastion role has s3:ListBucket on arn:aws:s3:::amazon-eks" >&2
-    elif [ -z "$KDATE" ]; then
-      echo "[kubectl] FAILED: no builds found under $KURL/ — is kubectl_version ($KVER) a full x.y.z version?" >&2
-    elif ! aws s3 cp "$KURL/$KDATE/bin/linux/amd64/kubectl" /usr/local/bin/kubectl; then
-      echo "[kubectl] FAILED to download — check s3:GetObject on arn:aws:s3:::amazon-eks/*" >&2
-    else
+    cat > /usr/local/bin/install-kubectl <<'SCRIPT'
+    #!/bin/bash
+    # Installs kubectl from the project's in-region tooling bucket.
+    set -uo pipefail
+    SRC="s3://__BUCKET__/kubectl/__KVER__/kubectl"
+    echo "[kubectl] fetching $SRC"
+    if aws s3 cp "$SRC" /usr/local/bin/kubectl; then
       chmod 0755 /usr/local/bin/kubectl
-      echo "[kubectl] installed $KVER build $KDATE at /usr/local/bin/kubectl"
-      /usr/local/bin/kubectl version --client || true
+      echo "[kubectl] installed at /usr/local/bin/kubectl"
+      /usr/local/bin/kubectl version --client
+    else
+      echo "[kubectl] FAILED. Checks, in order:" >&2
+      echo "  1. is the object seeded?  aws s3 ls $SRC" >&2
+      echo "  2. does the bastion role allow s3:GetObject on that bucket?" >&2
+      echo "  3. is the S3 gateway endpoint on this subnet's route table?" >&2
+      exit 1
     fi
+    SCRIPT
+
+    sed -i "s|__BUCKET__|${aws_s3_bucket.tooling.id}|; s|__KVER__|${var.kubectl_version}|" /usr/local/bin/install-kubectl
+    chmod 0755 /usr/local/bin/install-kubectl
+
+    # Best effort at boot. If the bucket is not seeded yet, this logs why and an
+    # operator can run install-kubectl later — boot is not blocked either way.
+    /usr/local/bin/install-kubectl || echo "[kubectl] not installed at boot; run 'sudo install-kubectl' once the bucket is seeded" >&2
 
     # kubeconfig for root; interactive SSM sessions run as ssm-user and should run
     # `aws eks update-kubeconfig` themselves, since each user has their own HOME.
