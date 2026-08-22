@@ -60,6 +60,7 @@ module "eks_addons" {
   source             = "./modules/eks-addons"
   cluster_name       = module.eks_cluster.cluster_name
   kubernetes_version = var.kubernetes_version
+  oidc_provider_arn  = module.eks_cluster.oidc_provider_arn
   vpc_cni_version    = var.vpc_cni_version
   coredns_version    = var.coredns_version
   kube_proxy_version = var.kube_proxy_version
