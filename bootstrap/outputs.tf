@@ -1,6 +1,16 @@
 output "role_arn" {
   value       = aws_iam_role.github_actions.arn
-  description = "ARN of the CI role. Set this as the *_AWS_ROLE_ARN GitHub secret for this account/environment."
+  description = "DEPRECATED — ARN of the legacy single CI role (*_AWS_ROLE_ARN). Retired once the plan/deploy roles are verified."
+}
+
+output "plan_role_arn" {
+  value       = aws_iam_role.plan.arn
+  description = "ARN of the read-only plan role. Set as the <ENV>_PLAN_ROLE_ARN GitHub secret."
+}
+
+output "deploy_role_arn" {
+  value       = aws_iam_role.deploy.arn
+  description = "ARN of the write-capable deploy role. Set as the <ENV>_DEPLOY_ROLE_ARN GitHub secret, and list it in cluster_admin_role_arns so workload applies are authorized inside the cluster."
 }
 
 output "oidc_provider_arn" {
