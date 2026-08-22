@@ -51,3 +51,13 @@ output "bastion_instance_id" {
   value       = module.bastion.bastion_instance_id
   description = "Connect with: aws ssm start-session --target <id>"
 }
+
+output "tooling_bucket" {
+  value       = module.bastion.tooling_bucket
+  description = "Bucket the bastion pulls kubectl from. The deploy workflow seeds it after applying the foundation layer."
+}
+
+output "kubectl_version" {
+  value       = module.bastion.kubectl_version
+  description = "kubectl version the bastion expects; the deploy workflow seeds this exact build."
+}
