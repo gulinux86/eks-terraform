@@ -57,14 +57,17 @@ module "vpc_endpoints" {
 # Managed core add-ons. Applied after the node group so coredns has compute to
 # schedule on; OVERWRITE adopts the EKS-installed defaults into IaC control.
 module "eks_addons" {
-  source             = "./modules/eks-addons"
-  cluster_name       = module.eks_cluster.cluster_name
-  kubernetes_version = var.kubernetes_version
-  oidc_provider_arn  = module.eks_cluster.oidc_provider_arn
-  vpc_cni_version    = var.vpc_cni_version
-  coredns_version    = var.coredns_version
-  kube_proxy_version = var.kube_proxy_version
-  tags               = var.tags
+  source                     = "./modules/eks-addons"
+  cluster_name               = module.eks_cluster.cluster_name
+  kubernetes_version         = var.kubernetes_version
+  oidc_provider_arn          = module.eks_cluster.oidc_provider_arn
+  vpc_cni_version            = var.vpc_cni_version
+  coredns_version            = var.coredns_version
+  kube_proxy_version         = var.kube_proxy_version
+  metrics_server_version     = var.metrics_server_version
+  ebs_csi_version            = var.ebs_csi_version
+  pod_identity_agent_version = var.pod_identity_agent_version
+  tags                       = var.tags
 
   depends_on = [module.eks_managed-node-group]
 }
