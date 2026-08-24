@@ -11,9 +11,17 @@ metadata:
 spec:
   description: Cluster-extending components. May create cluster-scoped resources.
 
-  # Only this repository. An Application naming any other source is refused.
+  # Every repository an Application may pull from — and a Helm chart repository
+  # counts. A multi-source Application takes its chart from one and its values from
+  # another, and Argo CD checks both against this list; listing only the Git
+  # repository fails every chart-based component with "repo is not permitted".
+  #
+  # Enumerated rather than "*" on purpose: this is what stops a component being
+  # installed from an arbitrary registry.
   sourceRepos:
-    - {{ .Values.platformRepoUrl | quote }}
+    {{- range .Values.platformSourceRepos }}
+    - {{ . | quote }}
+    {{- end }}
 
   destinations:
     - server: https://kubernetes.default.svc
@@ -38,7 +46,9 @@ spec:
   description: Applications. Namespaced resources only, within the app- prefix.
 
   sourceRepos:
-    - {{ .Values.appsRepoUrl | quote }}
+    {{- range .Values.appsSourceRepos }}
+    - {{ . | quote }}
+    {{- end }}
 
   # Prefix glob rather than an enumerated list. A fixed list would mean a
   # Terraform change for every new application — friction that eventually gets

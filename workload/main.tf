@@ -51,6 +51,8 @@ module "argocd_bootstrap" {
   platform_repo_url      = var.platform_repo_url
   platform_repo_revision = var.platform_repo_revision
   apps_repo_url          = var.apps_repo_url
+  platform_source_repos  = var.platform_source_repos
+  apps_source_repos      = var.apps_source_repos
   apps_namespaces        = var.apps_namespaces
 
   # The projects and the root app are meaningless until Argo CD's CRDs exist.

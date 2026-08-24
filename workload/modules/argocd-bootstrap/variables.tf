@@ -22,3 +22,13 @@ variable "apps_namespaces" {
   type        = list(string)
   description = "Namespace patterns the apps project may deploy into. A prefix glob such as [\"app-*\"] avoids a Terraform change per application while keeping kube-system, istio-system, argocd and cert-manager out of reach — they do not match the prefix."
 }
+
+variable "platform_source_repos" {
+  type        = list(string)
+  description = "Every repository the platform project may pull from, Helm chart repositories included. A multi-source Application takes its chart from one repo and its values from another, and Argo CD checks both — listing only the Git repository fails every chart-based component."
+}
+
+variable "apps_source_repos" {
+  type        = list(string)
+  description = "Every repository the apps project may pull from. Same rule: chart repositories count."
+}
