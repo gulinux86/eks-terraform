@@ -18,3 +18,9 @@ variable "argocd_chart_version" {
   description = "argo-cd Helm chart version. Chart 10.4.0 ships Argo CD v3.5.1."
   default     = "10.4.0"
 }
+
+variable "storage_reclaim_policy" {
+  type        = string
+  description = "Reclaim policy for the default StorageClass. Retain protects data; Delete prevents orphaned volumes accruing cost in an environment that is rebuilt often."
+  default     = "Retain"
+}
