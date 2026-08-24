@@ -11,3 +11,7 @@ foundation_state_key    = "foundation/hml/terraform.tfstate"
 # Retain buys is worth nothing here and the cleanup it costs is worth avoiding.
 # Production keeps the module default (Retain), where the trade runs the other way.
 storage_reclaim_policy = "Delete"
+
+# Argo CD chart version. Pinned, not defaulted: an unpinned chart means a rebuild
+# can install a different Argo CD than the one that was reviewed.
+argocd_chart_version = "10.4.0"

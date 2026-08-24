@@ -28,10 +28,6 @@ variable "tags" {
 variable "kubernetes_version" {
   type        = string
   description = "Kubernetes version for the EKS cluster. Pin a version in standard support (avoid extended-support versions)."
-  default     = "1.35"
-
-  # EKS takes a minor version only. A patch component or "v" prefix is rejected by
-  # the AWS API well into the apply.
   validation {
     condition     = can(regex("^1\\.\\d{2}$", var.kubernetes_version))
     error_message = "kubernetes_version must be a minor version like \"1.35\" — no patch component, no \"v\" prefix."
@@ -41,25 +37,21 @@ variable "kubernetes_version" {
 variable "vpc_cni_version" {
   type        = string
   description = "Pin the vpc-cni add-on version. Null resolves the latest compatible with kubernetes_version."
-  default     = null
 }
 
 variable "coredns_version" {
   type        = string
   description = "Pin the coredns add-on version. Null resolves the latest compatible with kubernetes_version."
-  default     = null
 }
 
 variable "kube_proxy_version" {
   type        = string
   description = "Pin the kube-proxy add-on version. Null resolves the latest compatible with kubernetes_version."
-  default     = null
 }
 
 variable "instance_types" {
   type        = list(string)
   description = "EC2 instance types for the managed node group. On a new AWS account under the Free Plan, only free-tier-eligible types launch (e.g. t3.small, t3.micro, c7i-flex.large, m7i-flex.large)."
-  default     = ["t3.small"]
 
   validation {
     condition     = length(var.instance_types) > 0
@@ -70,10 +62,6 @@ variable "instance_types" {
 variable "desired_size" {
   type        = number
   description = "Desired number of nodes"
-  default     = 1
-
-  # Cross-variable validation (Terraform >= 1.9). AWS rejects incoherent scaling
-  # only while creating the node group — after VPC, cluster and IAM already exist.
   validation {
     condition     = var.desired_size >= var.min_size && var.desired_size <= var.max_size
     error_message = "node sizing must satisfy min_size <= desired_size <= max_size."
@@ -83,19 +71,16 @@ variable "desired_size" {
 variable "min_size" {
   type        = number
   description = "Minimum number of nodes"
-  default     = 1
 }
 
 variable "max_size" {
   type        = number
   description = "Maximum number of nodes"
-  default     = 2
 }
 
 variable "endpoint_public_access" {
   type        = bool
   description = "Expose the EKS API server publicly so Terraform (GitHub-hosted runners) and operators can reach it. Private access remains enabled."
-  default     = true
 }
 
 variable "cluster_admin_role_arns" {
@@ -121,11 +106,24 @@ variable "cluster_admin_role_arns" {
 variable "public_access_cidrs" {
   type        = list(string)
   description = "CIDRs allowed to reach the public API endpoint. Tighten this per environment (e.g. office/CI egress ranges)."
-  default     = ["0.0.0.0/0"]
 }
 
 variable "log_retention_days" {
   type        = number
   description = "Retention for the EKS control-plane log group. Unmanaged, EKS creates it with no expiry and audit logs accumulate forever."
-  default     = 90
+}
+
+variable "metrics_server_version" {
+  type        = string
+  description = "metrics-server add-on version. Required, like every other add-on version: an unpinned add-on resolves to whatever is latest at apply time, so two applies months apart install different software with no diff in the code."
+}
+
+variable "ebs_csi_version" {
+  type        = string
+  description = "aws-ebs-csi-driver add-on version. Required for the same reason."
+}
+
+variable "pod_identity_agent_version" {
+  type        = string
+  description = "eks-pod-identity-agent add-on version. Required for the same reason."
 }

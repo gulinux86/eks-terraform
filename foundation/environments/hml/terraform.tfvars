@@ -64,3 +64,21 @@ tags = {
   Environment = "hml"
   ManagedBy   = "terraform"
 }
+
+# --- API endpoint exposure -------------------------------------------------
+# Public access is on so Terraform can reach the API from GitHub-hosted runners.
+# Stated here rather than inherited: whether the control plane answers the
+# internet is not a decision that should live in a module default.
+endpoint_public_access = true
+public_access_cidrs    = ["0.0.0.0/0"]
+
+# --- Control-plane log retention -------------------------------------------
+log_retention_days = 90
+
+# --- Add-on versions -------------------------------------------------------
+# Every add-on is pinned. Left unset, each resolves to whatever is newest at
+# apply time, so two applies months apart install different software with no
+# diff in the code — the drift ARCHITECTURE.md §4 exists to prevent.
+metrics_server_version     = "v0.9.0-eksbuild.6"
+ebs_csi_version            = "v1.64.0-eksbuild.1"
+pod_identity_agent_version = "v1.4.0-eksbuild.1"

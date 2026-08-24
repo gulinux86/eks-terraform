@@ -23,3 +23,21 @@ tags = {
   Environment = "prod"
   ManagedBy   = "terraform"
 }
+
+# --- API endpoint exposure -------------------------------------------------
+# Public access is still required while CI runs on GitHub-hosted runners, but
+# production must narrow the CIDR to known egress ranges before it carries real
+# traffic. Written out explicitly so the gap is visible in review rather than
+# inherited from a default — see ARCHITECTURE.md §11.
+endpoint_public_access = true
+public_access_cidrs    = ["0.0.0.0/0"] # TODO: office / CI egress ranges only
+
+# --- Control-plane log retention -------------------------------------------
+# Same 90 days as hml. Revisit if audit requirements or log volume argue
+# otherwise; the point is that the number is chosen, not defaulted.
+log_retention_days = 90
+
+# --- Add-on versions -------------------------------------------------------
+metrics_server_version     = "v0.9.0-eksbuild.6"
+ebs_csi_version            = "v1.64.0-eksbuild.1"
+pod_identity_agent_version = "v1.4.0-eksbuild.1"
