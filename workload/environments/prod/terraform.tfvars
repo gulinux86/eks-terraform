@@ -11,3 +11,7 @@ foundation_state_key    = "foundation/prod/terraform.tfstate"
 # knowledge, and keeps billing after the claim is gone. Reclaiming it is a
 # deliberate act, which is the point.
 storage_reclaim_policy = "Retain"
+
+# Argo CD chart version. Pinned, not defaulted: an unpinned chart means a rebuild
+# can install a different Argo CD than the one that was reviewed.
+argocd_chart_version = "10.4.0"
