@@ -1,0 +1,67 @@
+# Two projects, two privilege levels.
+#
+# This is the boundary the two-repository split exists to create. Without it, both
+# repositories would carry identical power and the separation would be filing, not
+# security.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: {{ .Release.Namespace }}
+spec:
+  description: Cluster-extending components. May create cluster-scoped resources.
+
+  # Only this repository. An Application naming any other source is refused.
+  sourceRepos:
+    - {{ .Values.platformRepoUrl | quote }}
+
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: "*"
+
+  # Platform components install CRDs, ClusterRoles and Namespaces — Istio and
+  # cert-manager cannot work otherwise. This is precisely the power the apps
+  # project below is denied.
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: apps
+  namespace: {{ .Release.Namespace }}
+spec:
+  description: Applications. Namespaced resources only, within the app- prefix.
+
+  sourceRepos:
+    - {{ .Values.appsRepoUrl | quote }}
+
+  # Prefix glob rather than an enumerated list. A fixed list would mean a
+  # Terraform change for every new application — friction that eventually gets
+  # bypassed. A prefix keeps the boundary where it matters: kube-system,
+  # istio-system, argocd and cert-manager do not match, so they stay unreachable.
+  destinations:
+    {{- range .Values.appsNamespaces }}
+    - server: https://kubernetes.default.svc
+      namespace: {{ . | quote }}
+    {{- end }}
+
+  # Empty on purpose. An application repository cannot install a CRD, create a
+  # Namespace, or grant itself a ClusterRoleBinding — Argo CD refuses before
+  # applying, so this holds even if someone tries.
+  clusterResourceWhitelist: []
+
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+
+  # Nothing in an application should be creating RBAC that reaches beyond itself.
+  namespaceResourceBlacklist:
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
