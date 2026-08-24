@@ -34,3 +34,9 @@ module "argocd" {
   # the apply order legible: cluster add-ons first, then the GitOps controller.
   depends_on = [module.eks_aws_load_balancer_controller]
 }
+
+# Default StorageClass. The EBS CSI driver is installed by the foundation layer,
+# but a driver with no StorageClass provisions nothing — see the module README.
+module "storage" {
+  source = "./modules/storage"
+}
