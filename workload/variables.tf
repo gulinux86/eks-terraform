@@ -22,3 +22,23 @@ variable "storage_reclaim_policy" {
   type        = string
   description = "Reclaim policy for the default StorageClass. Retain protects data; Delete prevents orphaned volumes accruing cost in an environment that is rebuilt often."
 }
+
+variable "platform_repo_url" {
+  type        = string
+  description = "Git repository holding platform components. The platform AppProject accepts sources only from here."
+}
+
+variable "platform_repo_revision" {
+  type        = string
+  description = "Branch or tag the root Application tracks. A branch follows every commit; a tag makes promotion explicit."
+}
+
+variable "apps_repo_url" {
+  type        = string
+  description = "Git repository that will hold applications. Declared before the repository exists so the privilege boundary is reviewed before there is pressure to bend it."
+}
+
+variable "apps_namespaces" {
+  type        = list(string)
+  description = "Namespace patterns the apps project may deploy into. A prefix glob such as [\"app-*\"] avoids a Terraform change per application while keeping kube-system, istio-system, argocd and cert-manager unreachable."
+}

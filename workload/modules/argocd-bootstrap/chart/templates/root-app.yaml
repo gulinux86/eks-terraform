@@ -1,0 +1,47 @@
+# The root Application — the only one Terraform applies.
+#
+# It watches apps/ in the platform repository. Every component is an Application in
+# that directory, so adding one to the cluster becomes adding a file and committing:
+# Argo CD reconciles the rest. This is the whole point of app-of-apps, and the
+# reason Terraform's involvement ends here.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: {{ .Release.Namespace }}
+  # Never garbage-collect the root: deleting it would cascade to every child
+  # Application and take the platform with it.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: {{ .Values.platformRepoUrl | quote }}
+    targetRevision: {{ .Values.platformRepoRevision | quote }}
+    path: apps
+    directory:
+      # apps/ holds Applications only. Recursing would pull in components/ as raw
+      # manifests and apply them twice — once here and once through their own
+      # Application.
+      recurse: false
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ .Release.Namespace }}
+
+  syncPolicy:
+    automated:
+      # prune removes children whose file was deleted; selfHeal reverts manual
+      # kubectl edits. Together they make Git the only way to change the cluster —
+      # which is the property GitOps is actually for.
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

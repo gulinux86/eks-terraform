@@ -41,3 +41,18 @@ module "storage" {
   source         = "./modules/storage"
   reclaim_policy = var.storage_reclaim_policy
 }
+
+# The handover: Terraform creates the privilege boundary and one root Application,
+# then stops. Everything else reaches the cluster through Argo CD, from Git.
+module "argocd_bootstrap" {
+  source    = "./modules/argocd-bootstrap"
+  namespace = module.argocd.namespace
+
+  platform_repo_url      = var.platform_repo_url
+  platform_repo_revision = var.platform_repo_revision
+  apps_repo_url          = var.apps_repo_url
+  apps_namespaces        = var.apps_namespaces
+
+  # The projects and the root app are meaningless until Argo CD's CRDs exist.
+  depends_on = [module.argocd]
+}
