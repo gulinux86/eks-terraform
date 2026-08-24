@@ -9,10 +9,17 @@ kind: Application
 metadata:
   name: root
   namespace: {{ .Release.Namespace }}
-  # Never garbage-collect the root: deleting it would cascade to every child
-  # Application and take the platform with it.
-  finalizers:
-    - resources-finalizer.argocd.argoproj.io
+  # No resources-finalizer here, deliberately — and the earlier comment claiming
+  # it prevented cascade had it backwards: the finalizer is what *causes* one.
+  #
+  # The root Application is only ever deleted when the whole layer is torn down,
+  # and the cluster goes with it. Making Kubernetes block on Argo CD cascading
+  # through every child and its resources first is pure waste, and it deadlocks
+  # outright if the controller is being removed in the same operation: the
+  # finalizer waits for a controller that is no longer there.
+  #
+  # Component removal still works, and through the right mechanism: deleting a
+  # file from apps/ makes the root prune that child.
 spec:
   project: platform
 
