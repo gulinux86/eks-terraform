@@ -43,6 +43,9 @@ resource "helm_release" "bootstrap" {
   # exist first. Helm sorts unknown kinds alphabetically and AppProject precedes
   # Application, which gets the ordering right — and if it ever did not, Argo CD
   # reports "project not found" and reconciles once the project appears.
-  wait    = true
-  timeout = 300
+  wait = true
+
+  # Generous because uninstall is the slow direction: Argo CD has to reconcile the
+  # removal of every child before the release is gone. 300s was not enough.
+  timeout = 900
 }
