@@ -30,3 +30,17 @@ argocd_chart_version = "10.4.0"
 # The data in this environment is disposable by definition, so the protection
 # Retain buys is worth nothing here and the cleanup it costs is worth avoiding.
 storage_reclaim_policy = "Delete"
+
+# --- GitOps -------------------------------------------------------------------
+# The root Application tracks this repository; the platform AppProject accepts no
+# other source. Tracking a branch means Argo follows every commit — acceptable in
+# hml, where a bad sync is cheap to fix.
+platform_repo_url      = "https://github.com/gulinux86/platform-gitops"
+platform_repo_revision = "main"
+
+# Declared before the repository exists, so the boundary is written first.
+apps_repo_url = "https://github.com/gulinux86/app-gitops"
+
+# Prefix glob: a new application needs no Terraform change, and system namespaces
+# stay out of reach because they do not match.
+apps_namespaces = ["app-*"]

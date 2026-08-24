@@ -26,3 +26,17 @@ argocd_chart_version = "10.4.0"
 # keeps billing after the claim is gone. Reclaiming it is a deliberate act, which
 # is the point.
 storage_reclaim_policy = "Retain"
+
+# --- GitOps -------------------------------------------------------------------
+# The root Application tracks this repository; the platform AppProject accepts no
+# other source. Tracking a branch means Argo follows every commit — acceptable in
+# prod, where a bad sync is cheap to fix.
+platform_repo_url      = "https://github.com/gulinux86/platform-gitops"
+platform_repo_revision = "main"
+
+# Declared before the repository exists, so the boundary is written first.
+apps_repo_url = "https://github.com/gulinux86/app-gitops"
+
+# Prefix glob: a new application needs no Terraform change, and system namespaces
+# stay out of reach because they do not match.
+apps_namespaces = ["app-*"]
