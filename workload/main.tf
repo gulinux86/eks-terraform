@@ -38,5 +38,6 @@ module "argocd" {
 # Default StorageClass. The EBS CSI driver is installed by the foundation layer,
 # but a driver with no StorageClass provisions nothing — see the module README.
 module "storage" {
-  source = "./modules/storage"
+  source         = "./modules/storage"
+  reclaim_policy = var.storage_reclaim_policy
 }

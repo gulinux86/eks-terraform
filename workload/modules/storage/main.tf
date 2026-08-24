@@ -17,7 +17,15 @@ resource "kubernetes_storage_class_v1" "gp3" {
   }
 
   storage_provisioner = "ebs.csi.aws.com"
-  reclaim_policy      = "Delete"
+
+  # Retain by default: deleting a PVC must not silently destroy its data.
+  #
+  # The cost of that choice is real and worth stating — a retained volume is left
+  # in Released state, outside Terraform's knowledge, so it survives
+  # `terraform destroy` and keeps billing. In an environment rebuilt every session
+  # those accumulate. Find them with:
+  #   aws ec2 describe-volumes --filters Name=status,Values=available
+  reclaim_policy = var.reclaim_policy
 
   # EBS volumes live in a single AZ. Binding late lets the scheduler place the pod
   # first and then create the volume where the pod actually landed; binding
