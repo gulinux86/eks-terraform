@@ -9,17 +9,21 @@ kind: Application
 metadata:
   name: root
   namespace: {{ .Release.Namespace }}
-  # No resources-finalizer here, deliberately — and the earlier comment claiming
-  # it prevented cascade had it backwards: the finalizer is what *causes* one.
+  # The finalizer makes deletion cascade: removing the root tells Argo CD to
+  # delete every child Application and the resources they own.
   #
-  # The root Application is only ever deleted when the whole layer is torn down,
-  # and the cluster goes with it. Making Kubernetes block on Argo CD cascading
-  # through every child and its resources first is pure waste, and it deadlocks
-  # outright if the controller is being removed in the same operation: the
-  # finalizer waits for a controller that is no longer there.
+  # This was briefly removed after a destroy hung on it, which treated the symptom.
+  # The cascade is exactly what is needed — it is what deletes the Istio Gateway,
+  # and therefore its Service, while the load-balancer controller is still alive to
+  # remove the NLB. Without it Terraform tears the cluster down first and the NLB
+  # is orphaned, holding the subnets and failing the destroy.
   #
-  # Component removal still works, and through the right mechanism: deleting a
-  # file from apps/ makes the root prune that child.
+  # What was actually missing is ordering: nothing guaranteed the cascade finished
+  # before Argo CD itself was uninstalled, so the finalizer waited on a controller
+  # that was already gone. The pre-destroy step in terraform-destroy.yml supplies
+  # that guarantee. The two only work as a pair.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: platform
 

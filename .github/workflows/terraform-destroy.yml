@@ -81,6 +81,62 @@ jobs:
             echo "LAYERS=${{ github.event.inputs.layer }}" >> "$GITHUB_ENV"
           fi
 
+      # Kubernetes creates AWS resources that Terraform never sees: the ALB
+      # controller makes a load balancer for every LoadBalancer Service, and the
+      # VPC CNI makes security groups. Their controllers clean them up when the
+      # objects are deleted — but only while those controllers are still running.
+      # Destroy the cluster first and they are orphaned, and orphaned ENIs and
+      # security groups hold the subnets and the VPC, failing the destroy.
+      #
+      # Observed, not theorised: a teardown left an NLB that blocked both private
+      # subnets, and a second left two k8s-* security groups that blocked the VPC.
+      #
+      # So the cluster is emptied before Terraform touches anything. Deleting the
+      # Argo CD Applications cascades (the root carries resources-finalizer),
+      # which removes the Gateway, its Service, and with it the load balancer,
+      # with every controller still alive to do its own cleanup.
+      - name: Drain Kubernetes-owned AWS resources
+        if: contains(env.LAYERS, 'workload')
+        continue-on-error: true # a cluster that is already gone is not an error
+        run: |
+          set -uo pipefail
+          CLUSTER=$(terraform -chdir=foundation init -input=false \
+            -backend-config="environments/${ENVIRONMENT}/backend.hcl" >/dev/null 2>&1 \
+            && terraform -chdir=foundation output -raw cluster_name 2>/dev/null || true)
+
+          if [ -z "$CLUSTER" ] || ! aws eks describe-cluster --name "$CLUSTER" >/dev/null 2>&1; then
+            echo "no live cluster; nothing to drain"
+            exit 0
+          fi
+
+          aws eks update-kubeconfig --region us-east-1 --name "$CLUSTER"
+
+          echo "::group::deleting Argo CD Applications (cascades to their resources)"
+          kubectl delete applications --all -n argocd --cascade=foreground --timeout=10m || true
+          echo "::endgroup::"
+
+          # The controllers delete load balancers asynchronously. Wait rather than
+          # race: a load balancer still draining leaves ENIs that block a subnet.
+          echo "waiting for Kubernetes-created load balancers to go"
+          for i in $(seq 1 40); do
+            N=$(aws elbv2 describe-load-balancers \
+                  --query "length(LoadBalancers[?starts_with(LoadBalancerName, 'k8s-')])" --output text 2>/dev/null || echo 0)
+            [ "$N" = "0" ] && { echo "  none left"; break; }
+            echo "  $N remaining"
+            sleep 15
+          done
+
+          # Security groups the CNI and the load-balancer controller created. They
+          # outlive their controllers and hold the VPC; Terraform does not know them.
+          VPC=$(aws eks describe-cluster --name "$CLUSTER" --query 'cluster.resourcesVpcConfig.vpcId' --output text 2>/dev/null || true)
+          if [ -n "$VPC" ] && [ "$VPC" != "None" ]; then
+            for SG in $(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC" \
+                         --query "SecurityGroups[?starts_with(GroupName, 'k8s-')].GroupId" --output text 2>/dev/null); do
+              echo "  deleting security group $SG"
+              aws ec2 delete-security-group --group-id "$SG" || true
+            done
+          fi
+
       - name: Destroy
         run: |
           set -euo pipefail
