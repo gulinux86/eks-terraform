@@ -40,3 +40,15 @@ apps_repo_url = "https://github.com/gulinux86/app-gitops"
 # Prefix glob: a new application needs no Terraform change, and system namespaces
 # stay out of reach because they do not match.
 apps_namespaces = ["app-*"]
+
+# Chart repositories count as sources. A multi-source Application pulls its chart
+# from one and its values from another, and Argo CD checks both — listing only the
+# Git repository fails every chart-based component with "repo is not permitted".
+platform_source_repos = [
+  "https://github.com/gulinux86/platform-gitops",
+  "https://github.com/kubernetes-sigs/gateway-api",
+  "https://charts.jetstack.io",
+  "https://istio-release.storage.googleapis.com/charts",
+]
+
+apps_source_repos = ["https://github.com/gulinux86/app-gitops"]

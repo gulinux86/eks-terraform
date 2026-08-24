@@ -27,6 +27,14 @@ resource "helm_release" "bootstrap" {
     value = var.apps_repo_url
   }
   set {
+    name  = "platformSourceRepos"
+    value = "{${join(",", var.platform_source_repos)}}"
+  }
+  set {
+    name  = "appsSourceRepos"
+    value = "{${join(",", var.apps_source_repos)}}"
+  }
+  set {
     name  = "appsNamespaces"
     value = "{${join(",", var.apps_namespaces)}}"
   }
