@@ -111,8 +111,19 @@ jobs:
 
           aws eks update-kubeconfig --region us-east-1 --name "$CLUSTER"
 
-          echo "::group::deleting Argo CD Applications (cascades to their resources)"
-          kubectl delete applications --all -n argocd --cascade=foreground --timeout=10m || true
+          # Delete what creates AWS resources FIRST, and directly.
+          #
+          # Relying on Argo CD to cascade does not work here: only the root
+          # Application carries resources-finalizer, so deleting every Application
+          # at once removes the children with no finalizer of their own and orphans
+          # everything they own — observed, with an NLB surviving a full ten-minute
+          # wait while its Service was already gone.
+          #
+          # A LoadBalancer Service is the thing that maps to an NLB, so deleting it
+          # is what makes the controller remove one. Targeting that directly needs
+          # no assumption about how any operator sequences its own teardown.
+          echo "::group::deleting LoadBalancer Services (what the controller maps to an NLB)"
+          kubectl delete svc --all-namespaces --field-selector spec.type=LoadBalancer --timeout=5m || true
           echo "::endgroup::"
 
           # The controllers delete load balancers asynchronously. Wait rather than
@@ -125,6 +136,13 @@ jobs:
             echo "  $N remaining"
             sleep 15
           done
+
+          # Only now remove the Applications. Doing it after the Services means Argo
+          # CD cannot recreate a Gateway — and its Service — through selfHeal while
+          # the load balancer is still draining.
+          echo "::group::deleting Argo CD Applications"
+          kubectl delete applications --all -n argocd --timeout=5m || true
+          echo "::endgroup::"
 
           # Security groups the CNI and the load-balancer controller created. They
           # outlive their controllers and hold the VPC; Terraform does not know them.
