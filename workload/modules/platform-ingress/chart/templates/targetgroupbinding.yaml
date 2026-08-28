@@ -1,0 +1,48 @@
+# The attachment point: the cluster registers into a target group it does not own.
+#
+# A TargetGroupBinding is a CRD from the AWS Load Balancer Controller. It registers
+# and deregisters pod IPs in a target group that already exists, and it never
+# creates or deletes that target group. That sentence is the entire teardown
+# guarantee — losing the cluster mid-flight leaves stale target entries, not an AWS
+# resource holding a subnet.
+#
+# It is what the controller does *instead of* creating a load balancer. Nothing in
+# the GitOps repository asks for one any more, so the controller's remaining job is
+# registration and the security-group rules below.
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Values.namespace }}
+spec:
+  # Both values name resources in one AWS account, which is why this manifest is
+  # rendered by Terraform rather than committed to the public platform repository —
+  # the same reasoning that put Karpenter's controller on Pod Identity instead of
+  # IRSA, to keep a role ARN out of a values file in Git.
+  targetGroupARN: {{ .Values.targetGroupArn | quote }}
+  targetType: ip
+
+  # Resolved in this object's own namespace. If the Gateway is renamed in Git
+  # without updating the Terraform variable, this reference goes stale: no targets
+  # register, the load balancer returns 503, and the target group shows empty.
+  # Nothing errors — check target health first (design §5).
+  serviceRef:
+    name: {{ .Values.serviceName | quote }}
+    port: {{ .Values.servicePort }}
+
+  # The controller writes these rules onto the security group attached to the
+  # targets. Without them the load balancer reaches the pod IP and is dropped: the
+  # target group reports unhealthy and nothing explains why.
+  #
+  # Two ports, not one. The health check runs against Istio's readiness port, so
+  # allowing only the traffic port leaves every target permanently unhealthy.
+  networking:
+    ingress:
+      - from:
+          - securityGroup:
+              groupID: {{ .Values.loadBalancerSecurityGroupId | quote }}
+        ports:
+          - protocol: TCP
+            port: {{ .Values.servicePort }}
+          - protocol: TCP
+            port: {{ .Values.healthCheckPort }}

@@ -17,3 +17,16 @@ AVD-AWS-0040
 # portfolio default; prod MUST narrow it to office/CI egress ranges
 # (ARCHITECTURE.md §10, §11). Remove this exception once prod restricts the CIDR.
 AVD-AWS-0041
+
+# The platform ingress listener serves plain HTTP. The load balancer is
+# `internal = true` and its security group admits only the VPC CIDR, so the
+# unencrypted hop exists entirely inside the VPC — there is no eavesdropping
+# position on the public internet to defend against yet.
+#
+# Terminating TLS here needs an ACM certificate, which needs a delegated domain.
+# That is `enable-external-app-access`, and this change deliberately keeps to one
+# axis (ARCHITECTURE.md §3, §11). This exception MUST be removed in that change:
+# the listener gains a certificate and port 80 becomes a redirect. If external
+# access lands and this line is still here, the platform is serving plaintext to
+# the internet.
+AVD-AWS-0054

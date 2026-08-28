@@ -52,3 +52,23 @@ variable "apps_source_repos" {
   type        = list(string)
   description = "Repositories the apps project may source from, chart repositories included."
 }
+
+# --- Platform ingress ---------------------------------------------------------
+# The one contract that points from Terraform out to the GitOps repository. Every
+# other cross-layer reference in this codebase flows the other way, so these are
+# declared without defaults: a wrong value here is silent (the target group simply
+# registers nothing), and a default would make it silent *and* invisible.
+variable "gateway_namespace" {
+  type        = string
+  description = "Namespace of the Service istiod generates for the platform Gateway. Must match the Gateway's namespace in the platform GitOps repository."
+}
+
+variable "gateway_service_name" {
+  type        = string
+  description = "Name of that Service. Istio derives it from the Gateway's name, so renaming the Gateway in Git requires changing this value in the same change."
+}
+
+variable "ingress_listener_port" {
+  type        = number
+  description = "Port the platform ingress load balancer listens on, and the Gateway Service port it forwards to."
+}
