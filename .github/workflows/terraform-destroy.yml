@@ -73,96 +73,179 @@ jobs:
 
       - name: Resolve layers
         run: |
-          # "both" must destroy workload BEFORE foundation (reverse of apply):
-          # workload depends on foundation's state and on a live cluster endpoint.
+          # LAYERS gates which steps run; the workload-before-foundation ordering is
+          # the order of the steps themselves, not the order of this string. They
+          # were separated so the VPC preflight can sit between them — see there.
           if [ "${{ github.event.inputs.layer }}" = "both" ]; then
             echo "LAYERS=workload foundation" >> "$GITHUB_ENV"
           else
             echo "LAYERS=${{ github.event.inputs.layer }}" >> "$GITHUB_ENV"
           fi
 
-      # Kubernetes creates AWS resources that Terraform never sees: the ALB
-      # controller makes a load balancer for every LoadBalancer Service, and the
-      # VPC CNI makes security groups. Their controllers clean them up when the
-      # objects are deleted — but only while those controllers are still running.
-      # Destroy the cluster first and they are orphaned, and orphaned ENIs and
-      # security groups hold the subnets and the VPC, failing the destroy.
+      # What the cluster still owns at teardown, and what it no longer does.
       #
-      # Observed, not theorised: a teardown left an NLB that blocked both private
-      # subnets, and a second left two k8s-* security groups that blocked the VPC.
+      # The ingress load balancer used to be created by a controller reacting to a
+      # Gateway in Git. It never entered Terraform state, so `terraform destroy`
+      # did not know it existed; its ENIs held the private subnets and the subnets
+      # held the VPC. Four consecutive runs failed that way on 2026-08-24, and two
+      # attempts to script around it both aimed at an object another controller
+      # owned — Applications whose children carried no finalizer, then a Service
+      # that istiod recreates from its Gateway.
       #
-      # So the cluster is emptied before Terraform touches anything. Deleting the
-      # Argo CD Applications cascades (the root carries resources-finalizer),
-      # which removes the Gateway, its Service, and with it the load balancer,
-      # with every controller still alive to do its own cleanup.
-      - name: Drain Kubernetes-owned AWS resources
+      # That is gone. `workload/modules/platform-ingress` declares the load
+      # balancer, and the cluster only attaches to it through a TargetGroupBinding,
+      # so the edge tears down in dependency order with nothing scripting it
+      # (ARCHITECTURE.md §3). The Service deletion, the k8s-* wait loop and the
+      # security-group sweep were removed here after run 33406865986 destroyed a
+      # live ingress path cleanly with all three finding nothing to do.
+      #
+      # What remains has nothing to do with load balancers:
+      #
+      #   1. Freeze automation. selfHeal restores whatever the teardown deletes.
+      #   2. Strip finalizers. An Application waiting on one blocks the Helm
+      #      uninstall — a destroy hung five minutes that way and failed with
+      #      "context deadline exceeded".
+      #
+      # Karpenter will add a third when its NodePools exist: its instances are EC2
+      # outside Terraform state, and their ENIs hold subnets. Same class of
+      # problem, but draining a NodePool is deterministic polling rather than a bet
+      # on how an operator sequences its own deletion.
+      - name: Drain cluster-owned state
         if: contains(env.LAYERS, 'workload')
-        continue-on-error: true # a cluster that is already gone is not an error
         run: |
           set -uo pipefail
           CLUSTER=$(terraform -chdir=foundation init -input=false \
             -backend-config="environments/${ENVIRONMENT}/backend.hcl" >/dev/null 2>&1 \
             && terraform -chdir=foundation output -raw cluster_name 2>/dev/null || true)
 
+          # An absent cluster is success, not an error worth swallowing with
+          # continue-on-error. That flag used to cover this case and a drain that
+          # failed to converge equally, which meant a real failure reached
+          # `terraform destroy` disguised as a skip.
           if [ -z "$CLUSTER" ] || ! aws eks describe-cluster --name "$CLUSTER" >/dev/null 2>&1; then
-            echo "no live cluster; nothing to drain"
+            echo "no live cluster for '$ENVIRONMENT'; nothing to drain"
             exit 0
           fi
 
           aws eks update-kubeconfig --region us-east-1 --name "$CLUSTER"
 
-          # Delete what creates AWS resources FIRST, and directly.
+          # Freeze first, delete second.
           #
-          # Relying on Argo CD to cascade does not work here: only the root
-          # Application carries resources-finalizer, so deleting every Application
-          # at once removes the children with no finalizer of their own and orphans
-          # everything they own — observed, with an NLB surviving a full ten-minute
-          # wait while its Service was already gone.
-          #
-          # A LoadBalancer Service is the thing that maps to an NLB, so deleting it
-          # is what makes the controller remove one. Targeting that directly needs
-          # no assumption about how any operator sequences its own teardown.
-          echo "::group::deleting LoadBalancer Services (what the controller maps to an NLB)"
-          kubectl delete svc --all-namespaces --field-selector spec.type=LoadBalancer --timeout=5m || true
+          # Every Application sets selfHeal: true, so deleting a resource Argo CD
+          # manages is an instruction to recreate it. Clearing syncPolicy.automated
+          # is the correct instrument — NOT scaling argocd-application-controller to
+          # zero, which is the obvious move and the wrong one: the same controller
+          # processes finalizers, so a deletion afterwards hangs forever.
+          echo "::group::freezing Argo CD automation"
+          for APP in $(kubectl get applications -n argocd -o name 2>/dev/null); do
+            kubectl patch "$APP" -n argocd --type merge \
+              -p '{"spec":{"syncPolicy":{"automated":null}}}' || true
+          done
           echo "::endgroup::"
 
-          # The controllers delete load balancers asynchronously. Wait rather than
-          # race: a load balancer still draining leaves ENIs that block a subnet.
-          echo "waiting for Kubernetes-created load balancers to go"
-          for i in $(seq 1 40); do
-            N=$(aws elbv2 describe-load-balancers \
-                  --query "length(LoadBalancers[?starts_with(LoadBalancerName, 'k8s-')])" --output text 2>/dev/null || echo 0)
-            [ "$N" = "0" ] && { echo "  none left"; break; }
-            echo "  $N remaining"
-            sleep 15
-          done
-
-          # Only now remove the Applications. Doing it after the Services means Argo
-          # CD cannot recreate a Gateway — and its Service — through selfHeal while
-          # the load balancer is still draining.
           echo "::group::deleting Argo CD Applications"
           kubectl delete applications --all -n argocd --timeout=5m || true
           echo "::endgroup::"
 
-          # Security groups the CNI and the load-balancer controller created. They
-          # outlive their controllers and hold the VPC; Terraform does not know them.
-          VPC=$(aws eks describe-cluster --name "$CLUSTER" --query 'cluster.resourcesVpcConfig.vpcId' --output text 2>/dev/null || true)
-          if [ -n "$VPC" ] && [ "$VPC" != "None" ]; then
-            for SG in $(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC" \
-                         --query "SecurityGroups[?starts_with(GroupName, 'k8s-')].GroupId" --output text 2>/dev/null); do
-              echo "  deleting security group $SG"
-              aws ec2 delete-security-group --group-id "$SG" || true
+          # Anything still holding a finalizer would block the Helm uninstall of the
+          # bootstrap release during `terraform destroy workload`.
+          REMAINING=$(kubectl get applications -n argocd -o name 2>/dev/null || true)
+          if [ -n "$REMAINING" ]; then
+            echo "::group::stripping finalizers from Applications that did not go"
+            for APP in $REMAINING; do
+              echo "  $APP"
+              kubectl patch "$APP" -n argocd --type merge \
+                -p '{"metadata":{"finalizers":null}}' || true
             done
+            kubectl delete applications --all -n argocd --timeout=2m || true
+            echo "::endgroup::"
           fi
 
-      - name: Destroy
+      # Destroyed before foundation: this layer depends on foundation's state and on
+      # a live cluster endpoint. It is also what removes the platform ALB, which is
+      # why the preflight below runs after it rather than before.
+      - name: Destroy workload
+        if: contains(env.LAYERS, 'workload')
         run: |
           set -euo pipefail
-          for L in $LAYERS; do
-            echo "::group::terraform destroy $L ($ENVIRONMENT)"
-            terraform -chdir="$L" init -input=false \
-              -backend-config="environments/${ENVIRONMENT}/backend.hcl"
-            terraform -chdir="$L" destroy -auto-approve -input=false \
-              -var-file="environments/${ENVIRONMENT}/terraform.tfvars"
-            echo "::endgroup::"
-          done
+          terraform -chdir=workload init -input=false \
+            -backend-config="environments/${ENVIRONMENT}/backend.hcl"
+          terraform -chdir=workload destroy -auto-approve -input=false \
+            -var-file="environments/${ENVIRONMENT}/terraform.tfvars"
+
+      # Fail here, in seconds, rather than inside `terraform destroy` forty minutes
+      # later as an opaque DependencyViolation.
+      #
+      # Placed BETWEEN the two layers, not before them. The platform ALB is owned by
+      # Terraform and is destroyed with the workload layer, so running this first
+      # would flag the very resource that is about to be removed correctly. By this
+      # point the only load balancer left in the VPC is one nothing is going to
+      # remove.
+      #
+      # Queried by VpcId, not by a k8s-* name prefix: a load balancer with a
+      # customised name was invisible to the old check, and classic load balancers
+      # were never counted at all.
+      - name: Preflight — the VPC holds nothing Terraform does not own
+        if: contains(env.LAYERS, 'foundation')
+        run: |
+          set -uo pipefail
+          CLUSTER=$(terraform -chdir=foundation init -input=false \
+            -backend-config="environments/${ENVIRONMENT}/backend.hcl" >/dev/null 2>&1 \
+            && terraform -chdir=foundation output -raw cluster_name 2>/dev/null || true)
+          [ -n "$CLUSTER" ] || { echo "no cluster in state; nothing to check"; exit 0; }
+
+          VPC=$(aws eks describe-cluster --name "$CLUSTER" \
+                --query 'cluster.resourcesVpcConfig.vpcId' --output text 2>/dev/null || true)
+          [ -n "$VPC" ] && [ "$VPC" != "None" ] || { echo "no live VPC; nothing to check"; exit 0; }
+
+          echo "checking VPC $VPC"
+          FAIL=0
+
+          # Terraform owns the platform ALB and destroys it itself, so anything here
+          # at this point is a load balancer nothing is going to remove.
+          LBS=$(aws elbv2 describe-load-balancers \
+                --query "LoadBalancers[?VpcId=='$VPC'].LoadBalancerName" --output text 2>/dev/null || true)
+          CLBS=$(aws elb describe-load-balancers \
+                 --query "LoadBalancerDescriptions[?VPCId=='$VPC'].LoadBalancerName" --output text 2>/dev/null || true)
+          if [ -n "$LBS$CLBS" ]; then
+            echo "  BLOCKING load balancers: $LBS $CLBS" >&2
+            FAIL=1
+          fi
+
+          SGS=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC" \
+                --query "SecurityGroups[?starts_with(GroupName,'k8s-')].GroupId" --output text 2>/dev/null || true)
+          if [ -n "$SGS" ]; then
+            echo "  BLOCKING controller-created security groups: $SGS" >&2
+            FAIL=1
+          fi
+
+          # Unattached ENIs hold a subnet exactly as an attached one does. This is
+          # the check Karpenter will exercise: its instances leave ENIs behind.
+          ENIS=$(aws ec2 describe-network-interfaces \
+                 --filters "Name=vpc-id,Values=$VPC" "Name=status,Values=available" \
+                 --query "NetworkInterfaces[].NetworkInterfaceId" --output text 2>/dev/null || true)
+          if [ -n "$ENIS" ]; then
+            echo "  BLOCKING unattached ENIs: $ENIS" >&2
+            FAIL=1
+          fi
+
+          if [ "$FAIL" = "1" ]; then
+            echo >&2
+            echo "The VPC holds resources Terraform does not manage. Destroying now would" >&2
+            echo "fail on DependencyViolation after tearing most of the platform down." >&2
+            echo >&2
+            echo "If you selected layer=foundation while the workload layer is still" >&2
+            echo "deployed, the platform ALB above is Terraform-owned and this is telling" >&2
+            echo "you to destroy workload first — run with layer=both." >&2
+            exit 1
+          fi
+          echo "  clean"
+
+      - name: Destroy foundation
+        if: contains(env.LAYERS, 'foundation')
+        run: |
+          set -euo pipefail
+          terraform -chdir=foundation init -input=false \
+            -backend-config="environments/${ENVIRONMENT}/backend.hcl"
+          terraform -chdir=foundation destroy -auto-approve -input=false \
+            -var-file="environments/${ENVIRONMENT}/terraform.tfvars"
