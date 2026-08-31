@@ -122,6 +122,14 @@ jobs:
           # continue-on-error. That flag used to cover this case and a drain that
           # failed to converge equally, which meant a real failure reached
           # `terraform destroy` disguised as a skip.
+          # A cluster name is alphanumerics, hyphens and underscores. Anything else
+          # is not a name: `terraform output -raw` prints "Warning: No outputs
+          # found" and exits 0 when the state has none, so the warning text lands
+          # here and would otherwise be passed to the AWS CLI as an identifier.
+          case "$CLUSTER" in
+            ""|*[!a-zA-Z0-9_-]*) CLUSTER="" ;;
+          esac
+
           if [ -z "$CLUSTER" ] || ! aws eks describe-cluster --name "$CLUSTER" >/dev/null 2>&1; then
             echo "no live cluster for '$ENVIRONMENT'; nothing to drain"
             exit 0
@@ -192,11 +200,19 @@ jobs:
           CLUSTER=$(terraform -chdir=foundation init -input=false \
             -backend-config="environments/${ENVIRONMENT}/backend.hcl" >/dev/null 2>&1 \
             && terraform -chdir=foundation output -raw cluster_name 2>/dev/null || true)
+          # Same shape check as the drain: an empty state makes `output -raw` print a
+          # warning and exit 0, and that text is not a cluster name.
+          case "$CLUSTER" in
+            ""|*[!a-zA-Z0-9_-]*) CLUSTER="" ;;
+          esac
           [ -n "$CLUSTER" ] || { echo "no cluster in state; nothing to check"; exit 0; }
 
           VPC=$(aws eks describe-cluster --name "$CLUSTER" \
                 --query 'cluster.resourcesVpcConfig.vpcId' --output text 2>/dev/null || true)
-          [ -n "$VPC" ] && [ "$VPC" != "None" ] || { echo "no live VPC; nothing to check"; exit 0; }
+          case "$VPC" in
+            vpc-*) ;;
+            *) echo "no live VPC; nothing to check"; exit 0 ;;
+          esac
 
           echo "checking VPC $VPC"
           FAIL=0
@@ -291,12 +307,19 @@ jobs:
           # Read before the -target destroy below: that one leaves the outputs
           # partially stale, and this value has to be the live VPC.
           #
-          # Errors are shown rather than swallowed. When this returned empty in an
-          # earlier revision there was no way to tell a missing output from a failed
-          # call, and the sweep that depends on it reported "none orphaned" either
-          # way — the exact ambiguity that let an orphaned interface through.
-          VPC=$(terraform -chdir=foundation output -raw vpc_id) || VPC=""
-          echo "vpc from foundation outputs: '${VPC:-<empty>}'"
+          # The shape is checked, not just the exit status. `terraform output -raw`
+          # prints "Warning: No outputs found" and exits 0 when the state has no
+          # outputs left, so the warning text itself lands in the variable. That is
+          # what happened in run 33419007931: the id became a paragraph of prose,
+          # the AWS call built from it failed, the failure was swallowed, and the
+          # sweep announced "none orphaned" while an orphaned interface sat in the
+          # VPC holding a subnet. Anything that is not a vpc- id is treated as no
+          # id at all.
+          VPC=$(terraform -chdir=foundation output -raw vpc_id 2>/dev/null || true)
+          case "$VPC" in
+            vpc-*) echo "vpc from foundation outputs: $VPC" ;;
+            *)     VPC=""; echo "no vpc_id in foundation outputs" ;;
+          esac
 
           echo "::group::terraform destroy — node group first"
           terraform -chdir=foundation destroy -auto-approve -input=false \
@@ -315,10 +338,13 @@ jobs:
           # here: the tag is a filter the API applies, and an error is now loud.
           #
           # Release lags termination, so this polls rather than looking once.
+          # No VPC means the foundation layer is already gone, which is a normal
+          # state to destroy from — there is nothing to sweep and nothing to fail
+          # about. A VPC that exists but blocks is still reported by the destroy
+          # itself, with the dependency named.
           if [ -z "$VPC" ]; then
-            echo "could not resolve vpc_id from foundation outputs; cannot sweep" >&2
-            exit 1
-          fi
+            echo "nothing deployed to sweep"
+          else
 
           echo "::group::sweeping orphaned VPC CNI network interfaces in $VPC"
           for i in $(seq 1 12); do
@@ -343,6 +369,7 @@ jobs:
             sleep 10
           done
           echo "::endgroup::"
+          fi
 
           echo "::group::terraform destroy — the rest of foundation"
           terraform -chdir=foundation destroy -auto-approve -input=false \
