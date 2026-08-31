@@ -219,8 +219,11 @@ jobs:
             FAIL=1
           fi
 
-          # Unattached ENIs hold a subnet exactly as an attached one does. This is
-          # the check Karpenter will exercise: its instances leave ENIs behind.
+          # Unattached ENIs hold a subnet exactly as an attached one does. This
+          # catches one left over from an earlier run; it cannot catch one created
+          # by a node that is still alive at this point, because the ENI is in use
+          # and correctly invisible here. Those are swept in `Destroy foundation`,
+          # after the node group is gone — see the comment there.
           ENIS=$(aws ec2 describe-network-interfaces \
                  --filters "Name=vpc-id,Values=$VPC" "Name=status,Values=available" \
                  --query "NetworkInterfaces[].NetworkInterfaceId" --output text 2>/dev/null || true)
@@ -241,11 +244,70 @@ jobs:
           fi
           echo "  clean"
 
+      # Destroyed in two passes, with an ENI sweep between them.
+      #
+      # The VPC CNI attaches secondary ENIs to each node to hand pods their IPs.
+      # When the node terminates those can be left behind in `available` state, and
+      # an unattached ENI holds a subnet exactly as an attached one does. Observed
+      # in run 33414534333: `eni-02a725bd07ff1cdc2  available  aws-K8S-i-0274c8...`
+      # blocked the private 1a subnet through twenty minutes of provider retries
+      # while the identical 1b subnet, which happened to have none, deleted in one
+      # second.
+      #
+      # It cannot be caught before Terraform runs. The ENI is in use while the node
+      # is alive, so the preflight correctly reports it as nothing; it only becomes
+      # an orphan once the node group is gone, which happens inside this step. So
+      # the node group is destroyed first, on its own, and the sweep runs in the
+      # window that opens — after the ENIs are released and before anything needs
+      # the subnet to be empty.
+      #
+      # `-target` is used deliberately here. It is discouraged for applies, where it
+      # hides drift, but this is teardown ordering, which is the one thing it
+      # expresses well and which this workflow already does between layers.
       - name: Destroy foundation
         if: contains(env.LAYERS, 'foundation')
         run: |
           set -euo pipefail
           terraform -chdir=foundation init -input=false \
             -backend-config="environments/${ENVIRONMENT}/backend.hcl"
+
+          VPC=$(terraform -chdir=foundation output -raw vpc_id 2>/dev/null || true)
+
+          echo "::group::terraform destroy — node group first"
+          terraform -chdir=foundation destroy -auto-approve -input=false \
+            -target=module.eks_managed-node-group \
+            -var-file="environments/${ENVIRONMENT}/terraform.tfvars"
+          echo "::endgroup::"
+
+          # Sweep what the nodes left behind. Scoped to the CNI's own naming
+          # (`aws-K8S-*`) rather than every available ENI: the cluster's control
+          # plane interfaces are also transiently unattached during teardown and
+          # EKS removes those itself.
+          #
+          # Release lags termination, so this polls rather than looking once. It
+          # never fails the job — if an ENI survives, the subnet delete reports it,
+          # and a sweep that cannot delete something is not itself the problem.
+          if [ -n "$VPC" ]; then
+            echo "::group::sweeping orphaned VPC CNI network interfaces"
+            for i in $(seq 1 12); do
+              ENIS=$(aws ec2 describe-network-interfaces \
+                     --filters "Name=vpc-id,Values=$VPC" "Name=status,Values=available" \
+                     --query "NetworkInterfaces[?starts_with(Description, 'aws-K8S-')].NetworkInterfaceId" \
+                     --output text 2>/dev/null || true)
+              if [ -z "$ENIS" ]; then
+                [ "$i" = "1" ] && echo "  none orphaned" || echo "  none left"
+                break
+              fi
+              for ENI in $ENIS; do
+                echo "  deleting $ENI"
+                aws ec2 delete-network-interface --network-interface-id "$ENI" || true
+              done
+              sleep 10
+            done
+            echo "::endgroup::"
+          fi
+
+          echo "::group::terraform destroy — the rest of foundation"
           terraform -chdir=foundation destroy -auto-approve -input=false \
             -var-file="environments/${ENVIRONMENT}/terraform.tfvars"
+          echo "::endgroup::"
