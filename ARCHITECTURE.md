@@ -64,9 +64,33 @@ through `terraform_remote_state`.
     portfolio that wants to *show* HA intent, per-AZ NAT is the honest choice;
     for pure cost demos, collapse to one.
 - **Subnet tagging.** Private subnets carry `kubernetes.io/role/internal-elb`.
-  Public subnets deliberately **omit** `kubernetes.io/role/elb`, so the ALB
-  controller cannot accidentally place internet-facing LBs there — load balancers
-  are internal by default.
+  Public subnets deliberately **omit** `kubernetes.io/role/elb`. The tags remain
+  for any load balancer a controller might still create, but they are no longer
+  what keeps the platform off the internet — see the next point.
+- **The ingress load balancer belongs to Terraform, not to a controller.**
+  `workload/modules/platform-ingress` declares an internal ALB, its target group,
+  its listener and its security group. The cluster attaches to it through a
+  `TargetGroupBinding`, a CRD from the AWS Load Balancer Controller that registers
+  and deregisters pod IPs in a target group it does not own.
+  - **Why:** a load balancer created from inside the cluster never enters Terraform
+    state, so `terraform destroy` has no edge from it to the subnets it occupies.
+    Its ENIs then hold the subnets and the subnets hold the VPC. Owning the
+    resource makes teardown ordering a property of the dependency graph instead of
+    a script that has to out-guess how two operators sequence their own deletions.
+    §11 records how that was learned.
+  - **The internet-facing guard moved with it.** It used to be the *absence* of a
+    subnet tag — defeatable by anyone who could tag a subnet or annotate a Service.
+    It is now the absence of `internal = false` in reviewed HCL: exposing the
+    platform takes an edit and a pull request.
+  - **Trade-off:** a new edge is a Terraform change rather than a manifest. For one
+    shared gateway that is the property this repository wants everywhere else; it
+    would be the wrong trade for a platform handing each team its own edge.
+  - **Coupling to name:** the workload layer must know the namespace and name of
+    the Service istiod generates for the platform `Gateway`, which is defined in
+    the GitOps repository — the one contract pointing from Terraform outward. It is
+    an explicit variable with no default. A mismatch is silent: the target group
+    registers nothing and the load balancer answers 503, so check target health
+    before reading logs.
 - **VPC endpoints (PrivateLink + S3 gateway).** ECR, STS, EC2, EKS, KMS, ELB,
   autoscaling, logs and the SSM trio resolve to private IPs.
   - **Trade-off / redundancy:** NAT already provides full egress, so the
@@ -132,7 +156,7 @@ through `terraform_remote_state`.
       ARN off the Kubernetes object entirely, which matters once manifests move to
       GitOps — and migrating this one later is contained.
   - **Still deferred:** dedicated VPC-CNI IRSA role, native network policy
-    (`ENABLE_NETWORK_POLICY`) and prefix delegation (see §11).
+    (`ENABLE_NETWORK_POLICY`) and prefix delegation (see §12).
 
 ## 5. Compute — managed node group
 
@@ -271,13 +295,19 @@ through `terraform_remote_state`.
     to a person, so every action it takes is logged as "the account". In hml that
     trade is acceptable — the environment is destroyed between sessions and holds
     nothing real. Production should grant a **role assumed for a session** and give
-    the operator a console login of their own with MFA. See §11.
+    the operator a console login of their own with MFA. See §12.
 - **Trade-off:** the bastion is an extra always-on `t3.micro` and an operational
   hop. The benefit is zero inbound exposure, no internet egress, and full Session
   Manager audit logging vs. an SSH bastion with a public IP and key management.
 
 ## 7. Add-ons — AWS Load Balancer Controller (IRSA)
 
+- **What it does here, and what it no longer does.** It registers pod IPs into the
+  Terraform-owned target group through a `TargetGroupBinding`, and writes the
+  security-group rules that let the load balancer reach those pods
+  (`spec.networking`). It does **not** create load balancers any more: nothing in
+  the cluster asks it to (§3). Its IAM policy is unchanged and therefore wider than
+  the job now needs — narrowing it is a separate, reviewed change.
 - **IRSA, not node-role permissions.** A dedicated IAM role trusts the cluster
   OIDC provider for exactly
   `system:serviceaccount:kube-system:aws-load-balancer-controller`. The pod gets
@@ -305,6 +335,13 @@ through `terraform_remote_state`.
   - **The ALB Controller was not migrated.** It stays a Terraform-owned
     `helm_release`. Two owners for one resource is the anti-pattern; moving it to
     Argo CD is its own reviewed change, not a side effect of this one.
+  - **The `TargetGroupBinding` is applied by Terraform, not by Argo CD.** It needs
+    the target-group ARN and the load balancer's security-group id, both of which
+    name one AWS account, and the platform GitOps repository is public. Same
+    reasoning that put Karpenter's controller on Pod Identity rather than IRSA
+    (§5): account-specific identifiers stay on the Terraform side of the fence.
+    Like the Argo CD bootstrap, it ships as a local Helm chart, for the same
+    plan-time CRD reason described above.
   - **Sizing is a hard constraint, not a preference.** The VPC CNI caps pods per
     node by ENI capacity: a `t3.small` allows **11**. Six are already taken by the
     cluster's own components and the ALB Controller, and Argo CD needs **7**
@@ -366,7 +403,7 @@ through `terraform_remote_state`.
     keeps release metadata, and the next policy up permits mutation.
   - **Known gap:** the deploy role still carries `AdministratorAccess`. Sizing a
     custom policy for EKS is iterative, and was deferred rather than stall the part
-    that removes the exposure. See §11.
+    that removes the exposure. See §12.
   - **Known gap:** a `prod` reviewer approves *before* the job starts, so they
     approve without seeing the plan. Splitting deploy into plan → approve → apply
     would fix it; not done here.
@@ -415,7 +452,75 @@ checks** on `master` (branch protection) to hard-block merges on failure.
 distinct state keys, and distinct AWS roles selected in CI. Production should
 additionally narrow `public_access_cidrs` from the default `0.0.0.0/0`.
 
-## 11. Known trade-offs to revisit for true production
+## 11. Teardown
+
+Destroying this platform is not the reverse of applying it, and the difference is
+not academic: four consecutive `terraform destroy` runs failed on 2026-08-24, and
+two attempts to script around the failure both aimed at the wrong object.
+
+**The shape of the problem.** Controllers inside the cluster create AWS resources
+that Terraform never records. Terraform then has no dependency edge from those
+resources to the subnets they occupy, so it tries to delete a subnet that is still
+held and AWS answers `DependencyViolation` — after most of the platform is already
+gone. The error names the subnet and never names what holds it.
+
+**The ingress load balancer was removed as a source**, by giving it to Terraform
+(§3). What remains cannot be: a resource that only becomes an orphan *during* the
+destroy cannot be checked before the destroy starts.
+
+`terraform-destroy.yml` is therefore ordered, not merely sequential:
+
+| Step | Why it is where it is |
+|---|---|
+| Drain cluster-owned state | Clears `syncPolicy.automated` on every Argo CD `Application` **before** deleting anything — `selfHeal` treats a deletion as an instruction to recreate. Then deletes the Applications, then strips finalizers from any that survive. |
+| Destroy workload | Removes the platform ALB, which is why the preflight runs after it and not before. |
+| Preflight | Asserts the VPC holds nothing unowned, in seconds, rather than letting it surface as a `DependencyViolation` forty minutes in. |
+| Destroy foundation | Destroys the node group **first**, on its own, sweeps the interfaces that releases, then destroys the rest. |
+
+### Things that are true and cost a day to learn
+
+- **The VPC CNI leaves interfaces behind.** It attaches secondary ENIs to each node
+  for pod IPs, and a terminated node can leave them `available`. An unattached ENI
+  holds a subnet exactly as an attached one does. This is invisible to any check
+  that runs before Terraform: while the node lives the interface is in use and
+  correctly reports as nothing. It orphans only once the node group is destroyed,
+  which is why that destroy is split out and the sweep runs in the window it opens.
+  Selected by the CNI's own tag `eks:eni:owner=amazon-vpc-cni`.
+- **`eks-cluster-sg-<cluster>-<id>` is owned by EKS, not by Terraform.** EKS creates
+  it with the cluster and deletes it with the cluster — *unless* something is still
+  in it, and an orphaned CNI interface is exactly that. Observed holding a VPC after
+  the cluster was gone. It is a symptom of the interface, not a cause: fix the ENI
+  and the group leaves with it. The preflight must **not** flag it while the cluster
+  is alive, which is a false positive that stopped a healthy teardown.
+- **`terraform output -raw` prints a warning and exits 0** when the state has no
+  outputs. The warning text becomes the value. Passed to the AWS CLI as an
+  identifier it produced a failed call, and a swallowed error made that
+  indistinguishable from an empty result — a sweep announced "none orphaned" while
+  an orphan sat in the VPC. Every identifier read this way is now checked for
+  shape, not for emptiness.
+- **A destroy that fails partway leaves partial outputs**, which breaks the pull
+  request plan for the `workload` layer — on pull requests that touch no Terraform
+  at all. The plan's greenfield guard asks whether the outputs that layer actually
+  reads are present, not whether the count is non-zero.
+- **Identify leftovers by ownership, never by name.** Three checks here originally
+  matched a name prefix (`k8s-`, `aws-K8S-`) or a count, and all three were wrong
+  in a state nobody had seen yet. Tags answer the question a prefix only guesses at.
+
+### What is not covered yet
+
+- **Karpenter (Phase 2).** Its instances are EC2 outside Terraform state and their
+  interfaces hold subnets — the same class as the CNI's, arriving from a different
+  source. The drain has an obvious place for a NodePool drain, and unlike the
+  failures above that one is deterministic polling rather than a bet on how an
+  operator sequences itself.
+- **The ENI sweep's delete branch is unexercised.** Two consecutive clean cycles
+  both reported `none orphaned`, because no interface was stranded either time. The
+  orphan is timing-dependent. The code is correct by inspection and its failures are
+  now loud, but the path that deletes has not run in anger.
+- **A local `terraform destroy` runs none of this.** The drain, the preflight and
+  the sweep live in the workflow. Destroying from a workstation skips all three.
+
+## 12. Known trade-offs to revisit for true production
 
 | Area | Current (portfolio) | Production-hardening step |
 |------|---------------------|---------------------------|
@@ -424,7 +529,10 @@ additionally narrow `public_access_cidrs` from the default `0.0.0.0/0`.
 | Egress | NAT + overlapping endpoints | Drop NAT, complete endpoint set |
 | Scaling | Fixed managed node group | Karpenter (+ small system node group) |
 | Core add-ons | vpc-cni/coredns/kube-proxy managed + pinned | + dedicated VPC-CNI IRSA, network policy, prefix delegation |
-| Cluster add-ons | ALB controller (IRSA + Helm) | + External Secrets, cert-manager, ExternalDNS, EBS-CSI, metrics-server, policy agents |
+| Cluster add-ons | ALB controller (IRSA + Helm) | + External Secrets, ExternalDNS, policy agents |
+| Ingress edge | Internal ALB owned by Terraform, one shared gateway | Internet-facing scheme + ACM on the listener + WAF; a second edge per team would change the ownership trade (§3) |
+| ALB controller policy | Unchanged, wider than the `TargetGroupBinding`-only role it now plays | Size it to registration and security-group rules |
+| Teardown | Ordered workflow: drain → workload → preflight → node group → ENI sweep → foundation | Cover Karpenter's instances; exercise the sweep's delete path; make a local destroy run the same checks (§11) |
 | State bucket | Single shared bucket (KMS CMK) | Per-account/per-env buckets + bucket policies |
 | CI deploy role | Split from the plan role; `AdministratorAccess` | Custom policy sized to the managed services + permission boundary |
 | Human cluster access | hml lists an IAM **user** and the **account root** as cluster-admin so the console works | A role assumed for a session; operator console login with MFA; no root in daily use and no standing cluster-admin on a long-lived principal |
