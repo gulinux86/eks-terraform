@@ -328,6 +328,52 @@ jobs:
             *)     VPC=""; echo "no vpc_id in foundation outputs" ;;
           esac
 
+          # Karpenter's nodes go before the node group, and before the sweep.
+          #
+          # They are EC2 instances outside Terraform state, so their interfaces hold
+          # subnets exactly as the CNI's leftovers do (ARCHITECTURE.md §11) — the same
+          # failure class from a second source. Deleting a NodePool asks Karpenter to
+          # cordon, drain and terminate what it created, and the controller is still
+          # running here to do it. Ordered ahead of the sweep so the interfaces those
+          # instances release are gone by the time it looks.
+          #
+          # Unlike the drain this workflow needed for ingress, nothing here depends on
+          # an operator's cascade semantics: an instance carrying the discovery tag
+          # either exists or it does not.
+          CLUSTER=$(terraform -chdir=foundation output -raw cluster_name 2>/dev/null || true)
+          case "$CLUSTER" in
+            ""|*[!a-zA-Z0-9_-]*) CLUSTER="" ;;
+          esac
+
+          if [ -n "$CLUSTER" ] && aws eks describe-cluster --name "$CLUSTER" >/dev/null 2>&1; then
+            aws eks update-kubeconfig --region us-east-1 --name "$CLUSTER" >/dev/null
+
+            echo "::group::draining Karpenter NodePools"
+            # A cluster that never had Karpenter has no such CRD, which is not an
+            # error — this workflow tears down clusters from before it existed.
+            if kubectl get crd nodepools.karpenter.sh >/dev/null 2>&1; then
+              kubectl delete nodepools --all --timeout=10m || true
+
+              # Termination is asynchronous. Poll the instances rather than trust the
+              # delete to have finished the work it started.
+              for i in $(seq 1 40); do
+                N=$(aws ec2 describe-instances \
+                      --filters "Name=tag:karpenter.sh/discovery,Values=$CLUSTER" \
+                                "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+                      --query "length(Reservations[].Instances[])" --output text) || {
+                  echo "  could not list instances; aborting rather than guessing" >&2
+                  exit 1
+                }
+                [ "$N" = "0" ] && { echo "  no Karpenter instances left"; break; }
+                echo "  $N still terminating"
+                sleep 15
+              done
+            else
+              echo "  no Karpenter CRDs; nothing to drain"
+            fi
+            echo "::endgroup::"
+          fi
+
           echo "::group::terraform destroy — node group first"
           terraform -chdir=foundation destroy -auto-approve -input=false \
             -target=module.eks_managed-node-group \
