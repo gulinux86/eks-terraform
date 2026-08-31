@@ -46,7 +46,7 @@ variable "plan_policy_arn" {
 
 variable "deploy_policy_arn" {
   type        = string
-  description = "Managed policy attached to the deploy role. AdministratorAccess remains a known gap (ARCHITECTURE.md §11): sizing a custom policy for EKS is iterative and was deliberately deferred, since the role split already removes this credential from pull-request reach."
+  description = "Managed policy attached to the deploy role. AdministratorAccess remains a known gap (ARCHITECTURE.md §12): sizing a custom policy for EKS is iterative and was deliberately deferred, since the role split already removes this credential from pull-request reach."
   default     = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
 
