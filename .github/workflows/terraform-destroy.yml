@@ -204,18 +204,35 @@ jobs:
           # Terraform owns the platform ALB and destroys it itself, so anything here
           # at this point is a load balancer nothing is going to remove.
           LBS=$(aws elbv2 describe-load-balancers \
-                --query "LoadBalancers[?VpcId=='$VPC'].LoadBalancerName" --output text 2>/dev/null || true)
+                --query "LoadBalancers[?VpcId=='$VPC'].LoadBalancerName" --output text) || FAIL=1
           CLBS=$(aws elb describe-load-balancers \
-                 --query "LoadBalancerDescriptions[?VPCId=='$VPC'].LoadBalancerName" --output text 2>/dev/null || true)
+                 --query "LoadBalancerDescriptions[?VPCId=='$VPC'].LoadBalancerName" --output text) || FAIL=1
           if [ -n "$LBS$CLBS" ]; then
             echo "  BLOCKING load balancers: $LBS $CLBS" >&2
             FAIL=1
           fi
 
+          # Security groups nobody is going to delete: not the VPC's default, and not
+          # carrying the ManagedBy=terraform tag every group in this repository gets
+          # through var.tags.
+          #
+          # Ownership, not a name prefix. The old check matched `k8s-`, which is how
+          # a leftover `eks-cluster-sg-<cluster>-<id>` — the group EKS creates for
+          # the cluster, and the one an orphaned CNI interface belongs to — sat in
+          # the VPC unseen while holding it. A prefix is a guess about who created
+          # something; the tag is the answer.
+          #
+          # Foundation's own groups are still alive at this point and are excluded by
+          # that tag, not by position: this step runs before `Destroy foundation`.
           SGS=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC" \
-                --query "SecurityGroups[?starts_with(GroupName,'k8s-')].GroupId" --output text 2>/dev/null || true)
+                --query "SecurityGroups[?GroupName!='default' && !(Tags[?Key=='ManagedBy' && Value=='terraform'])].[GroupId,GroupName]" \
+                --output text) || {
+            echo "  could not list security groups in $VPC" >&2
+            FAIL=1
+          }
           if [ -n "$SGS" ]; then
-            echo "  BLOCKING controller-created security groups: $SGS" >&2
+            echo "  BLOCKING security groups Terraform does not own:" >&2
+            echo "$SGS" | sed 's/^/    /' >&2
             FAIL=1
           fi
 
@@ -226,7 +243,7 @@ jobs:
           # after the node group is gone — see the comment there.
           ENIS=$(aws ec2 describe-network-interfaces \
                  --filters "Name=vpc-id,Values=$VPC" "Name=status,Values=available" \
-                 --query "NetworkInterfaces[].NetworkInterfaceId" --output text 2>/dev/null || true)
+                 --query "NetworkInterfaces[].NetworkInterfaceId" --output text) || FAIL=1
           if [ -n "$ENIS" ]; then
             echo "  BLOCKING unattached ENIs: $ENIS" >&2
             FAIL=1
@@ -271,7 +288,15 @@ jobs:
           terraform -chdir=foundation init -input=false \
             -backend-config="environments/${ENVIRONMENT}/backend.hcl"
 
-          VPC=$(terraform -chdir=foundation output -raw vpc_id 2>/dev/null || true)
+          # Read before the -target destroy below: that one leaves the outputs
+          # partially stale, and this value has to be the live VPC.
+          #
+          # Errors are shown rather than swallowed. When this returned empty in an
+          # earlier revision there was no way to tell a missing output from a failed
+          # call, and the sweep that depends on it reported "none orphaned" either
+          # way — the exact ambiguity that let an orphaned interface through.
+          VPC=$(terraform -chdir=foundation output -raw vpc_id) || VPC=""
+          echo "vpc from foundation outputs: '${VPC:-<empty>}'"
 
           echo "::group::terraform destroy — node group first"
           terraform -chdir=foundation destroy -auto-approve -input=false \
@@ -279,33 +304,45 @@ jobs:
             -var-file="environments/${ENVIRONMENT}/terraform.tfvars"
           echo "::endgroup::"
 
-          # Sweep what the nodes left behind. Scoped to the CNI's own naming
-          # (`aws-K8S-*`) rather than every available ENI: the cluster's control
-          # plane interfaces are also transiently unattached during teardown and
-          # EKS removes those itself.
+          # Sweep what the nodes left behind.
           #
-          # Release lags termination, so this polls rather than looking once. It
-          # never fails the job — if an ENI survives, the subnet delete reports it,
-          # and a sweep that cannot delete something is not itself the problem.
-          if [ -n "$VPC" ]; then
-            echo "::group::sweeping orphaned VPC CNI network interfaces"
-            for i in $(seq 1 12); do
-              ENIS=$(aws ec2 describe-network-interfaces \
-                     --filters "Name=vpc-id,Values=$VPC" "Name=status,Values=available" \
-                     --query "NetworkInterfaces[?starts_with(Description, 'aws-K8S-')].NetworkInterfaceId" \
-                     --output text 2>/dev/null || true)
-              if [ -z "$ENIS" ]; then
-                [ "$i" = "1" ] && echo "  none orphaned" || echo "  none left"
-                break
-              fi
-              for ENI in $ENIS; do
-                echo "  deleting $ENI"
-                aws ec2 delete-network-interface --network-interface-id "$ENI" || true
-              done
-              sleep 10
-            done
-            echo "::endgroup::"
+          # Selected by the CNI's own tag, `eks:eni:owner=amazon-vpc-cni`, which is
+          # what actually records who created the interface. The first version of
+          # this matched `aws-K8S-` on the description and reported "none orphaned"
+          # in run 33419007931 while exactly such an interface sat in the VPC — and
+          # because that query silenced stderr and fell back to an empty result, a
+          # failed call and an empty VPC were indistinguishable. Both are fixed
+          # here: the tag is a filter the API applies, and an error is now loud.
+          #
+          # Release lags termination, so this polls rather than looking once.
+          if [ -z "$VPC" ]; then
+            echo "could not resolve vpc_id from foundation outputs; cannot sweep" >&2
+            exit 1
           fi
+
+          echo "::group::sweeping orphaned VPC CNI network interfaces in $VPC"
+          for i in $(seq 1 12); do
+            ENIS=$(aws ec2 describe-network-interfaces \
+                   --filters "Name=vpc-id,Values=$VPC" \
+                             "Name=status,Values=available" \
+                             "Name=tag:eks:eni:owner,Values=amazon-vpc-cni" \
+                   --query "NetworkInterfaces[].NetworkInterfaceId" --output text) || {
+              echo "  could not list network interfaces in $VPC" >&2
+              exit 1
+            }
+            if [ -z "$ENIS" ]; then
+              [ "$i" = "1" ] && echo "  none orphaned" || echo "  none left"
+              break
+            fi
+            for ENI in $ENIS; do
+              echo "  deleting $ENI"
+              # Not fatal on its own: an interface that refuses to go is reported by
+              # the subnet delete, with the dependency named.
+              aws ec2 delete-network-interface --network-interface-id "$ENI" || true
+            done
+            sleep 10
+          done
+          echo "::endgroup::"
 
           echo "::group::terraform destroy — the rest of foundation"
           terraform -chdir=foundation destroy -auto-approve -input=false \
