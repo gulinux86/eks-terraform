@@ -18,6 +18,34 @@ module "eks_aws_load_balancer_controller" {
   vpc_id       = data.terraform_remote_state.foundation.outputs.vpc_id
 }
 
+# The platform's ingress edge, owned by Terraform.
+#
+# The load balancer, its target group and its security group are declared here so
+# that `terraform destroy` holds the edge from the load balancer to the subnets it
+# occupies. Previously a controller created that load balancer in response to a
+# Gateway in Git, it never entered state, and its ENIs held the private subnets
+# through four failed destroys (ARCHITECTURE.md §3, design §1).
+#
+# The cluster's only involvement is a TargetGroupBinding, which registers pod IPs
+# into a target group it does not own.
+module "platform_ingress" {
+  source       = "./modules/platform-ingress"
+  project_name = data.terraform_remote_state.foundation.outputs.project_name
+  tags         = data.terraform_remote_state.foundation.outputs.tags
+
+  vpc_id             = data.terraform_remote_state.foundation.outputs.vpc_id
+  vpc_cidr           = data.terraform_remote_state.foundation.outputs.vpc_cidr
+  private_subnet_ids = data.terraform_remote_state.foundation.outputs.private_subnet_ids
+
+  gateway_namespace    = var.gateway_namespace
+  gateway_service_name = var.gateway_service_name
+  listener_port        = var.ingress_listener_port
+
+  # TargetGroupBinding is the controller's CRD, so the controller has to be
+  # installed before the binding can be accepted.
+  depends_on = [module.eks_aws_load_balancer_controller]
+}
+
 # Argo CD. Installed last in the workload layer, which is itself the last layer
 # applied — so it lands on a cluster that already has its network, nodes and
 # load-balancer controller in place.

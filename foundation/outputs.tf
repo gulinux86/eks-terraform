@@ -47,6 +47,21 @@ output "vpc_id" {
   description = "VPC ID, used by the AWS Load Balancer Controller in the workload layer"
 }
 
+# The workload layer places the platform ingress load balancer itself, rather than
+# letting a controller in the cluster create one (ARCHITECTURE.md §3). That needs
+# somewhere to put it and something to scope its security group to, so both are
+# re-exported here. The network module has declared them all along; this layer
+# simply never passed them on.
+output "private_subnet_ids" {
+  value       = module.eks_network.private_subnet_ids
+  description = "Private subnets the platform ingress load balancer is placed in. Internal-only: the public subnets are deliberately not offered here."
+}
+
+output "vpc_cidr" {
+  value       = module.eks_network.vpc_cidr
+  description = "VPC CIDR, scoping the ingress load balancer's security group while it stays internal"
+}
+
 output "bastion_instance_id" {
   value       = module.bastion.bastion_instance_id
   description = "Connect with: aws ssm start-session --target <id>"
