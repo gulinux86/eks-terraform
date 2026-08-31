@@ -23,11 +23,29 @@ GitHub Actions CI/CD pipeline.
                          │  │  Managed node group (AL2023)    │         │
                          │  │  Bastion (access via SSM)       │         │
                          │  │  VPC interface/gateway endpoints│         │
+                         │  │  Platform ALB (internal)        │         │
                          │  └────────────────────────────────┘         │
                          └─────────────────────────────────────────────┘
 
   foundation/  ──(terraform_remote_state)──▶  workload/
-  network, EKS, KMS, OIDC, nodes, bastion       ALB Controller (IRSA + Helm) + Argo CD
+  network, EKS, KMS, OIDC, nodes, bastion       ALB Controller, platform ingress,
+                                                storage, Argo CD + the handover
+```
+
+The ingress edge is **owned by Terraform**, not created by a controller reacting to
+a manifest: an internal ALB and its target group live in the `workload` layer, and
+the cluster attaches through a `TargetGroupBinding`. That is what makes
+`terraform destroy` able to remove it in dependency order — see
+[ARCHITECTURE.md §3](ARCHITECTURE.md) and the teardown notes in §11.
+
+```
+  platform-gitops (Argo CD)          eks-terraform (Terraform)
+  ─────────────────────────          ─────────────────────────
+  Gateway  ──istiod──▶ Service       aws_lb (internal)
+                       ClusterIP     aws_lb_target_group
+                          ▲          aws_lb_listener
+                          └──────────  TargetGroupBinding
+                             registers pod IPs; owns nothing
 ```
 
 ## Layers
@@ -36,7 +54,7 @@ GitHub Actions CI/CD pipeline.
 |--------------|----------------------------------------------------------------------------------|--------------------------------------|
 | `bootstrap`  | One-time per account: KMS-encrypted S3 **state bucket** + GitHub Actions **OIDC roles** | local state — **not** committed (`*.tfstate` is gitignored) |
 | `foundation` | VPC, subnets, NAT/IGW, EKS, KMS, OIDC, managed node group, bastion, VPC endpoints, core add-ons (vpc-cni/coredns/kube-proxy) | `foundation/<env>/terraform.tfstate` |
-| `workload`   | Cluster add-ons — AWS Load Balancer Controller (IRSA + Helm) and Argo CD          | `workload/<env>/terraform.tfstate`   |
+| `workload`   | Cluster add-ons — AWS Load Balancer Controller (IRSA + Helm), the platform ingress ALB, the default StorageClass, and Argo CD with the AppProjects and root Application that hand the cluster over | `workload/<env>/terraform.tfstate`   |
 
 `bootstrap` runs once to create the backend the other layers use. The `workload`
 layer reads `foundation` outputs through `terraform_remote_state`, so
@@ -74,6 +92,21 @@ terraform -chdir=workload apply -var-file=environments/hml/terraform.tfvars
 
 Swap `hml` for `prod` for the production environment.
 
+### Tearing down
+
+**Use `terraform-destroy.yml`, not a local `terraform destroy`.** Removing this
+platform is not the reverse of applying it: controllers inside the cluster create
+AWS resources Terraform never records, and those hold subnets after the cluster is
+gone. The workflow handles that in order — it freezes Argo CD's automation before
+deleting anything, strips finalizers that would hang the Helm uninstall, checks the
+VPC before the destructive part starts, and sweeps the network interfaces a
+terminated node group leaves behind.
+
+A local destroy runs none of those steps. It works when nothing was stranded, and
+fails with an opaque `DependencyViolation` after most of the platform is gone when
+something was. ARCHITECTURE.md §11 has the details and the failures that produced
+them.
+
 ### Cluster access via the bastion
 
 The bastion is a private, SSM-only jump host (no public IP, no inbound rules).
@@ -96,7 +129,7 @@ kubectl get nodes
 | `terraform-test.yml`    | PR (`**.tf`/`**.tftest.hcl`), `workflow_dispatch` | Native `terraform test` on critical modules; mocked providers → no AWS creds, no infra |
 | `security-scan.yml`     | PR (Terraform paths), `workflow_dispatch`        | Trivy IaC scan (`config` mode); fails on HIGH/CRITICAL; uploads SARIF to the Security tab |
 | `terraform-deploy.yml`  | `workflow_dispatch` (env + layer)                | **Gated** by `terraform test` + Trivy, then `plan -out` + `apply` of the saved plan (`foundation`→`workload`); `prod` requires reviewer approval |
-| `terraform-destroy.yml` | `workflow_dispatch` (env + layer, typed confirm) | `destroy` (`workload` before `foundation` for `both`); `prod` requires reviewer approval |
+| `terraform-destroy.yml` | `workflow_dispatch` (env + layer, typed confirm) | Ordered teardown: drain the cluster → destroy `workload` → preflight the VPC → destroy the node group → sweep orphaned ENIs → destroy the rest of `foundation`; `prod` requires reviewer approval |
 
 - AWS authentication via **OIDC** (no static keys), through **two roles split by
   what the job does** — see [Pipeline access](#pipeline-access-two-roles) below.
@@ -195,7 +228,7 @@ trivy config --severity HIGH,CRITICAL --ignorefile .trivyignore .
 ```
 
 Accepted, documented exceptions live in `.trivyignore` (each with a reason).
-Tighten them for `prod` — see `ARCHITECTURE.md` §11.
+Tighten them for `prod` — see `ARCHITECTURE.md` §12.
 
 ## Repository layout
 
@@ -205,12 +238,13 @@ bootstrap/                # one-time: KMS-encrypted state bucket + OIDC role (lo
 foundation/
   main.tf  provider.tf  variables.tf  backend.tf  outputs.tf  README.md
   environments/{hml,prod}/{terraform.tfvars,backend.hcl}
-  modules/{network,cluster,managed-node-group,bastion,vpc-endpoints,eks-addons}/
+  modules/{network,cluster,managed-node-group,bastion,vpc-endpoints,eks-addons,karpenter}/
     tests/*.tftest.hcl    # native terraform test (network, cluster, eks-addons)
 workload/
   main.tf  provider.tf  variables.tf  backend.tf  README.md
   environments/{hml,prod}/{terraform.tfvars,backend.hcl}
-  modules/{aws-load-balancer-controller,argocd}/
+  modules/{aws-load-balancer-controller,platform-ingress,storage,argocd,argocd-bootstrap}/
+scripts/check-layer-contract.sh   # foundation outputs vs. what workload consumes
 .github/workflows/        # plan, test, security-scan, deploy, destroy
 .trivyignore              # documented, accepted Trivy exceptions
 ARCHITECTURE.md

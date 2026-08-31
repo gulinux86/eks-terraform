@@ -44,7 +44,7 @@ No modules.
 
 | Name | Description | Type | Default | Required |
 | ---- | ----------- | ---- | ------- | :------: |
-| <a name="input_deploy_policy_arn"></a> [deploy\_policy\_arn](#input\_deploy\_policy\_arn) | Managed policy attached to the deploy role. AdministratorAccess remains a known gap (ARCHITECTURE.md §11): sizing a custom policy for EKS is iterative and was deliberately deferred, since the role split already removes this credential from pull-request reach. | `string` | `"arn:aws:iam::aws:policy/AdministratorAccess"` | no |
+| <a name="input_deploy_policy_arn"></a> [deploy\_policy\_arn](#input\_deploy\_policy\_arn) | Managed policy attached to the deploy role. AdministratorAccess remains a known gap (ARCHITECTURE.md §12): sizing a custom policy for EKS is iterative and was deliberately deferred, since the role split already removes this credential from pull-request reach. | `string` | `"arn:aws:iam::aws:policy/AdministratorAccess"` | no |
 | <a name="input_deploy_role_name"></a> [deploy\_role\_name](#input\_deploy\_role\_name) | Name of the write-capable IAM role assumed by terraform-deploy and terraform-destroy | `string` | `"github-actions-eks-deploy"` | no |
 | <a name="input_environment"></a> [environment](#input\_environment) | Environment this AWS account serves (hml or prod). The deploy role trusts only this environment's GitHub Environment claim, so bootstrapping an account is a deliberate choice — there is no default. | `string` | n/a | yes |
 | <a name="input_github_repository"></a> [github\_repository](#input\_github\_repository) | GitHub repository allowed to assume the role, as owner/name | `string` | `"gulinux86/eks-terraform"` | no |
