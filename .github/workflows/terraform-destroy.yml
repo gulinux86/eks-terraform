@@ -228,20 +228,27 @@ jobs:
             FAIL=1
           fi
 
-          # Security groups nobody is going to delete: not the VPC's default, and not
-          # carrying the ManagedBy=terraform tag every group in this repository gets
-          # through var.tags.
+          # Security groups nobody is going to delete.
           #
-          # Ownership, not a name prefix. The old check matched `k8s-`, which is how
-          # a leftover `eks-cluster-sg-<cluster>-<id>` — the group EKS creates for
-          # the cluster, and the one an orphaned CNI interface belongs to — sat in
-          # the VPC unseen while holding it. A prefix is a guess about who created
-          # something; the tag is the answer.
+          # Three owners are excluded, because each of them removes its own on the
+          # way out: the VPC's default group, anything tagged ManagedBy=terraform
+          # (every group in this repository, through var.tags), and anything tagged
+          # aws:eks:cluster-name — the group EKS creates for the cluster and deletes
+          # when the cluster goes.
           #
-          # Foundation's own groups are still alive at this point and are excluded by
-          # that tag, not by position: this step runs before `Destroy foundation`.
+          # That last exclusion is not a weakening. This step runs before
+          # `Destroy foundation`, so the cluster is still alive and its group is
+          # supposed to be here; flagging it blocked a teardown that had nothing
+          # wrong with it. The run where such a group really did strand the VPC had
+          # a different shape — the cluster was already gone, and the group survived
+          # only because an orphaned CNI interface still sat in it. That is an
+          # interface problem, handled by the sweep in `Destroy foundation`, and the
+          # group follows it out.
+          #
+          # What is left after the three exclusions is a group with no owner at all,
+          # which is the thing worth stopping for.
           SGS=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC" \
-                --query "SecurityGroups[?GroupName!='default' && !(Tags[?Key=='ManagedBy' && Value=='terraform'])].[GroupId,GroupName]" \
+                --query "SecurityGroups[?GroupName!='default' && !(Tags[?Key=='ManagedBy' && Value=='terraform']) && !(Tags[?Key=='aws:eks:cluster-name'])].[GroupId,GroupName]" \
                 --output text) || {
             echo "  could not list security groups in $VPC" >&2
             FAIL=1
