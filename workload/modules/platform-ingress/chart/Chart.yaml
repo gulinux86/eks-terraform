@@ -1,0 +1,5 @@
+apiVersion: v2
+name: platform-ingress
+description: Binds the platform gateway's pods to the Terraform-owned target group
+type: application
+version: 0.1.0
