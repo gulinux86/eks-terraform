@@ -53,6 +53,12 @@ platform_source_repos = [
   "https://github.com/kubernetes-sigs/gateway-api",
   "https://charts.jetstack.io",
   "https://istio-release.storage.googleapis.com/charts",
+
+  # Karpenter ships as an OCI artifact rather than from an HTTP chart repository.
+  # Argo CD checks the scheme-qualified URL against this list exactly as it does a
+  # Git or HTTPS source, so omitting it fails the Application with "repo is not
+  # permitted" — the failure PR #31 exists to fix, from a different registry.
+  "oci://public.ecr.aws/karpenter/karpenter",
 ]
 
 apps_source_repos = ["https://github.com/gulinux86/app-gitops"]
