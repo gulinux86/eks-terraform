@@ -475,6 +475,7 @@ jobs:
           else
 
           echo "::group::sweeping orphaned VPC CNI network interfaces in $VPC"
+          EMPTY=0
           for i in $(seq 1 12); do
             ENIS=$(aws ec2 describe-network-interfaces \
                    --filters "Name=vpc-id,Values=$VPC" \
@@ -484,10 +485,23 @@ jobs:
               echo "  could not list network interfaces in $VPC" >&2
               exit 1
             }
+            # Two consecutive empty passes, not one.
+            #
+            # Release lags termination, and this runs seconds after instances were
+            # terminated — so the first look can legitimately find nothing while an
+            # interface is still detaching. Breaking there is how a sweep reports
+            # "none orphaned" and is wrong: run 33906645713 said it thirty seconds
+            # after a node was terminated.
             if [ -z "$ENIS" ]; then
-              [ "$i" = "1" ] && echo "  none orphaned" || echo "  none left"
-              break
+              EMPTY=$((EMPTY + 1))
+              if [ "$EMPTY" -ge 2 ]; then
+                echo "  none left"
+                break
+              fi
+              sleep 15
+              continue
             fi
+            EMPTY=0
             for ENI in $ENIS; do
               echo "  deleting $ENI"
               # Not fatal on its own: an interface that refuses to go is reported by
@@ -497,6 +511,59 @@ jobs:
             sleep 10
           done
           echo "::endgroup::"
+          fi
+
+          # The cluster next, on its own, for the same reason the node group was.
+          #
+          # EKS creates a security group for the cluster and deletes it with the
+          # cluster — usually. When it lingers it holds the VPC, and the VPC is
+          # destroyed in the same pass as the cluster, so there is no moment in
+          # between for anything to notice. Observed in run 33906645713: the subnet
+          # deleted cleanly and `eks-cluster-sg-eks-hml-cluster-571031308` sat in an
+          # otherwise empty VPC through twenty minutes of retries.
+          #
+          # Same shape as the node group and its interfaces, one level up:
+          #
+          #   node group   →  CNI interfaces  →  hold the subnets
+          #   cluster      →  cluster SG      →  holds the VPC
+          #
+          # Both need a window between "Terraform removed X" and "Terraform needs
+          # what X's debris is holding".
+          echo "::group::terraform destroy — cluster next"
+          terraform -chdir=foundation destroy -auto-approve -input=false \
+            -target=module.eks_cluster \
+            -var-file="environments/${ENVIRONMENT}/terraform.tfvars"
+          echo "::endgroup::"
+
+          # Whatever EKS left behind.
+          #
+          # Selected the way the preflight selects: not the VPC's default group, and
+          # not carrying the ManagedBy=terraform tag every group in this repository
+          # gets through var.tags. Foundation's own groups are still alive at this
+          # point and are excluded by that tag; with the cluster gone, what remains
+          # in that category is by definition debris.
+          #
+          # Deletion can fail while something still references the group, so this
+          # polls rather than trying once.
+          if [ -n "$VPC" ]; then
+            echo "::group::sweeping security groups EKS left behind"
+            for i in $(seq 1 12); do
+              SGS=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC" \
+                    --query "SecurityGroups[?GroupName!='default' && !(Tags[?Key=='ManagedBy' && Value=='terraform'])].GroupId" \
+                    --output text) || {
+                echo "  could not list security groups in $VPC" >&2
+                exit 1
+              }
+              [ -z "$SGS" ] && { [ "$i" = "1" ] && echo "  none left behind" || echo "  none left"; break; }
+              for SG in $SGS; do
+                echo "  deleting $SG"
+                # Not fatal on its own: a group that refuses to go is reported by the
+                # VPC delete, with the dependency named.
+                aws ec2 delete-security-group --group-id "$SG" || true
+              done
+              sleep 10
+            done
+            echo "::endgroup::"
           fi
 
           echo "::group::terraform destroy — the rest of foundation"
