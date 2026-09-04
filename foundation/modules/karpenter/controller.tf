@@ -37,6 +37,10 @@ resource "aws_eks_pod_identity_association" "controller" {
 }
 
 locals {
+  # Applied by the network and cluster modules to the subnets and security groups
+  # Karpenter selects. Deliberately NOT used to scope instance permissions: it never
+  # reaches an instance, because Karpenter reserves the karpenter.sh/ prefix and
+  # drops it from an EC2NodeClass's tags without saying so.
   discovery_tag = "karpenter.sh/discovery"
 }
 
@@ -75,8 +79,26 @@ data "aws_iam_policy_document" "controller" {
   }
 
   # Deletion is scoped by tag: Karpenter may only terminate what Karpenter made.
-  # Without this condition the controller could terminate any instance in the
-  # account, including the bastion and the system pool.
+  # Without a condition the controller could terminate any instance in the account,
+  # including the bastion and the system pool.
+  #
+  # The condition used to name karpenter.sh/discovery, which reads sensibly and can
+  # never match. That tag is on the *subnets and security groups* Karpenter selects;
+  # it is not on the instances it launches, and it cannot be put there — Karpenter
+  # reserves the karpenter.sh/ prefix and drops such keys from an EC2NodeClass's
+  # tags silently, with no error and no warning. So this statement authorised
+  # nothing, and the controller could not terminate its own nodes.
+  #
+  # Two conditions now, matching the tags Karpenter actually writes and following
+  # the policy AWS publishes for it:
+  #
+  #   kubernetes.io/cluster/<name>=owned  — the instance belongs to this cluster.
+  #     On its own this is too wide: EKS puts the same tag on managed node group
+  #     instances, so it would put the system pool in reach.
+  #   karpenter.sh/nodepool=*             — and Karpenter launched it. This is the
+  #     one that excludes the node group and the bastion.
+  #
+  # Both must hold. Neither is sufficient alone.
   statement {
     sid       = "TerminateOwnResources"
     effect    = "Allow"
@@ -88,8 +110,14 @@ data "aws_iam_policy_document" "controller" {
 
     condition {
       test     = "StringEquals"
-      variable = "aws:ResourceTag/${local.discovery_tag}"
-      values   = [var.cluster_name]
+      variable = "aws:ResourceTag/kubernetes.io/cluster/${var.cluster_name}"
+      values   = ["owned"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "aws:ResourceTag/karpenter.sh/nodepool"
+      values   = ["*"]
     }
   }
 
