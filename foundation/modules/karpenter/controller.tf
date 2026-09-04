@@ -94,6 +94,16 @@ data "aws_iam_policy_document" "controller" {
   }
 
   # Karpenter v1 manages the instance profile for its nodes itself.
+  #
+  # ListInstanceProfiles is not part of creating one — it is what the garbage
+  # collector uses to find profiles whose nodes are gone. Without it the controller
+  # logs AccessDenied on every GC pass and the profiles accumulate, unreferenced and
+  # unnoticed. Found by reading the controller's logs on the first real run, not by
+  # reviewing this policy.
+  #
+  # It is a List over the account's profiles and cannot be scoped by resource, which
+  # is why it sits apart from the rest: those are writes on a profile Karpenter owns,
+  # this is a read across all of them.
   statement {
     sid       = "ManageInstanceProfiles"
     effect    = "Allow"
@@ -103,6 +113,7 @@ data "aws_iam_policy_document" "controller" {
       "iam:CreateInstanceProfile",
       "iam:DeleteInstanceProfile",
       "iam:GetInstanceProfile",
+      "iam:ListInstanceProfiles",
       "iam:RemoveRoleFromInstanceProfile",
       "iam:TagInstanceProfile",
     ]
