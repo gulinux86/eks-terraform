@@ -96,14 +96,39 @@ jobs:
             HCL="foundation/environments/${ENV_NAME}/backend.hcl"
             BUCKET=$(sed -nE 's/^[[:space:]]*bucket[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$HCL")
             KEY=$(sed -nE 's/^[[:space:]]*key[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$HCL")
-            FOUNDATION_OUTPUTS=$(aws s3 cp "s3://$BUCKET/$KEY" - 2>/dev/null | jq -r '.outputs | length' 2>/dev/null || echo 0)
-            if [ "${FOUNDATION_OUTPUTS:-0}" = "0" ]; then
+            STATE=$(aws s3 cp "s3://$BUCKET/$KEY" - 2>/dev/null || echo '{}')
+
+            # Asks whether the outputs this layer actually reads are present, not
+            # whether the count is non-zero.
+            #
+            # A count assumes outputs arrive and leave together, which a destroy that
+            # fails partway does not honour: one left `vpc_cidr` behind, another left
+            # two, and both times the guard passed and the plan failed with a page of
+            # "Unsupported attribute" on a pull request that changed no Terraform at
+            # all. Worse, it deadlocks — the destroy that would clear the state needs
+            # a workflow fix, and the pull request carrying that fix cannot go green.
+            #
+            # The list is derived from workload/ the same way
+            # scripts/check-layer-contract.sh derives it, so a new consumer needs no
+            # change here.
+            MISSING=""
+            for NAME in $(grep -rhoE 'terraform_remote_state\.foundation\.outputs\.[a-zA-Z0-9_]+' \
+                          --include='*.tf' workload \
+                          | sed -E 's/.*\.outputs\.//' | sort -u); do
+              printf '%s' "$STATE" | jq -e --arg n "$NAME" '.outputs[$n]' >/dev/null 2>&1 \
+                || MISSING="$MISSING $NAME"
+            done
+
+            if [ -n "$MISSING" ]; then
               {
-                echo "Skipped: foundation layer has no outputs for '${ENV_NAME}' yet."
+                echo "Skipped: the foundation layer does not currently publish everything"
+                echo "the workload layer reads for '${ENV_NAME}'."
                 echo
-                echo "The workload layer reads the foundation layer's remote state, which is"
-                echo "either not applied yet or was destroyed (empty state). Apply the foundation"
-                echo "layer for '${ENV_NAME}' (terraform-deploy → layer: foundation), then re-run."
+                echo "Missing outputs:$MISSING"
+                echo
+                echo "Foundation is either not applied yet, destroyed, or left partly"
+                echo "destroyed by a failed run. Apply it (terraform-deploy → layer:"
+                echo "foundation) and re-run, or finish the teardown so the state is empty."
               } > /tmp/plan_output.txt
               echo "skipped=true" >> "$GITHUB_OUTPUT"
               echo "exitcode=0" >> "$GITHUB_OUTPUT"
