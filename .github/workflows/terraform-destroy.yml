@@ -168,19 +168,49 @@ jobs:
 
             # Termination is asynchronous; poll rather than trust the delete to have
             # finished the work it started.
-            for i in $(seq 1 40); do
-              N=$(aws ec2 describe-instances \
-                    --filters "Name=tag:karpenter.sh/nodepool,Values=*" \
-                              "Name=tag:kubernetes.io/cluster/$CLUSTER,Values=owned" \
-                              "Name=instance-state-name,Values=pending,running,stopping,stopped" \
-                    --query "length(Reservations[].Instances[])" --output text) || {
+            KARPENTER_FILTERS='--filters Name=tag:karpenter.sh/nodepool,Values=* Name=tag:kubernetes.io/cluster/'"$CLUSTER"',Values=owned Name=instance-state-name,Values=pending,running,stopping,stopped'
+
+            IDS=""
+            for i in $(seq 1 20); do
+              # shellcheck disable=SC2086
+              IDS=$(aws ec2 describe-instances $KARPENTER_FILTERS \
+                    --query "Reservations[].Instances[].InstanceId" --output text) || {
                 echo "  could not list instances; aborting rather than guessing" >&2
                 exit 1
               }
-              [ "$N" = "0" ] && { echo "  no Karpenter instances left"; break; }
-              echo "  $N still terminating"
+              [ -z "$IDS" ] && { echo "  no Karpenter instances left"; break; }
+              echo "  waiting on: $IDS"
               sleep 15
             done
+
+            # Karpenter is the right thing to terminate its own nodes, and it is not
+            # the only thing that can. If instances survive the wait, terminate them
+            # here.
+            #
+            # This is not impatience — it is the recovery case. A destroy that failed
+            # partway leaves a cluster whose workload layer is already gone, so there
+            # is no Karpenter controller left to drain anything: the NodePool delete
+            # above is a no-op, the instances sit there, and the subnet delete fails
+            # on them twenty minutes later. Observed in run 33894400089, where this
+            # loop watched one instance for a full ten minutes and then moved on
+            # without saying it had given up.
+            #
+            # The targets are named by two tags, so this cannot reach the bastion or
+            # the system pool even if both are in the same VPC.
+            if [ -n "$IDS" ]; then
+              echo "  Karpenter did not terminate these; doing it directly: $IDS"
+              # shellcheck disable=SC2086
+              aws ec2 terminate-instances --instance-ids $IDS >/dev/null || {
+                echo "  could not terminate $IDS" >&2
+                exit 1
+              }
+              # shellcheck disable=SC2086
+              aws ec2 wait instance-terminated --instance-ids $IDS || {
+                echo "  instances did not reach terminated state" >&2
+                exit 1
+              }
+              echo "  terminated"
+            fi
             echo "::endgroup::"
           else
             echo "no Karpenter CRDs; nothing to drain"
