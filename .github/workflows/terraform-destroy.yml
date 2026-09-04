@@ -231,12 +231,32 @@ jobs:
           #
           # vpc_id survives, because the VPC is what is still failing to delete. And
           # scoping to the VPC is what "this environment" actually means here.
-          VPC=$(terraform -chdir=foundation init -input=false \
-            -backend-config="environments/${ENVIRONMENT}/backend.hcl" >/dev/null 2>&1 \
-            && terraform -chdir=foundation output -raw vpc_id 2>/dev/null || true)
+          terraform -chdir=foundation init -input=false \
+            -backend-config="environments/${ENVIRONMENT}/backend.hcl" >/dev/null 2>&1 || true
+
+          # Read from the state, not from the outputs.
+          #
+          # `terraform output` is not a reliable source here, and Terraform says so
+          # itself after a -target run: "the output values may not be fully updated".
+          # This workflow uses -target twice, so by the time a recovery run reaches
+          # this point the outputs have been rewritten and vpc_id can be gone while
+          # the VPC resource is still sitting in state, undeleted. That is precisely
+          # the run that needs the sweeps, and it is the run that skipped them
+          # (33913319451).
+          #
+          # The resource is the fact; the output is a projection of it. Reading the
+          # projection has now failed twice in different ways: once returning
+          # "Warning: No outputs found" as the value itself (run 33419007931), and
+          # once returning nothing at all after -target rewrote the outputs.
+          vpc_from_state() {
+            terraform -chdir=foundation show -json 2>/dev/null \
+              | jq -r '[.. | objects | select(.type? == "aws_vpc") | .values.id] | first // empty' 2>/dev/null
+          }
+
+          VPC=$(vpc_from_state)
           case "$VPC" in
             vpc-*) echo "looking in $VPC" ;;
-            *) echo "no vpc_id in state; nothing left to look in"; exit 0 ;;
+            *) echo "no VPC in state; nothing left to look in"; exit 0 ;;
           esac
 
           # Termination is asynchronous; poll rather than trust the delete to have
@@ -432,21 +452,29 @@ jobs:
           terraform -chdir=foundation init -input=false \
             -backend-config="environments/${ENVIRONMENT}/backend.hcl"
 
-          # Read before the -target destroy below: that one leaves the outputs
-          # partially stale, and this value has to be the live VPC.
+          # Read from the state, not from the outputs.
           #
-          # The shape is checked, not just the exit status. `terraform output -raw`
-          # prints "Warning: No outputs found" and exits 0 when the state has no
-          # outputs left, so the warning text itself lands in the variable. That is
-          # what happened in run 33419007931: the id became a paragraph of prose,
-          # the AWS call built from it failed, the failure was swallowed, and the
-          # sweep announced "none orphaned" while an orphaned interface sat in the
-          # VPC holding a subnet. Anything that is not a vpc- id is treated as no
-          # id at all.
-          VPC=$(terraform -chdir=foundation output -raw vpc_id 2>/dev/null || true)
+          # `terraform output` is not a reliable source here, and Terraform says so
+          # itself after a -target run: "the output values may not be fully updated".
+          # This workflow uses -target twice, so by the time a recovery run reaches
+          # this point the outputs have been rewritten and vpc_id can be gone while
+          # the VPC resource is still sitting in state, undeleted. That is precisely
+          # the run that needs the sweeps, and it is the run that skipped them
+          # (33913319451).
+          #
+          # The resource is the fact; the output is a projection of it. Reading the
+          # projection has now failed twice in different ways: once returning
+          # "Warning: No outputs found" as the value itself (run 33419007931), and
+          # once returning nothing at all after -target rewrote the outputs.
+          vpc_from_state() {
+            terraform -chdir=foundation show -json 2>/dev/null \
+              | jq -r '[.. | objects | select(.type? == "aws_vpc") | .values.id] | first // empty' 2>/dev/null
+          }
+
+          VPC=$(vpc_from_state)
           case "$VPC" in
-            vpc-*) echo "vpc from foundation outputs: $VPC" ;;
-            *)     VPC=""; echo "no vpc_id in foundation outputs" ;;
+            vpc-*) echo "vpc from state: $VPC" ;;
+            *)     VPC=""; echo "no VPC in state" ;;
           esac
 
           echo "::group::terraform destroy — node group first"
