@@ -155,66 +155,71 @@ jobs:
           #
           # Deleting a NodePool asks Karpenter to cordon, drain and terminate the
           # nodes it created. Only Karpenter can do that, so this has to happen
-          # before the Application that installs Karpenter is deleted below — the
-          # first version of this ran inside `Destroy foundation`, three steps later,
-          # by which point the controller was gone and two nodes were left running
-          # with their NodeClaims stuck.
+          # before the Application that installs Karpenter is deleted below — an
+          # earlier version ran inside `Destroy foundation`, three steps later, by
+          # which point the controller was gone and two nodes were left running with
+          # their NodeClaims stuck.
           #
           # Same principle the rest of this step follows: delete what owns AWS
           # resources while the thing that owns it is alive.
+          echo "::group::draining Karpenter NodePools"
+
+          # The CRD gates the NodePool delete and nothing else.
+          #
+          # It used to gate the instance sweep below as well, which put the recovery
+          # path behind the thing that fails in a recovery. A destroy that stopped
+          # partway has already had its Applications deleted, so Karpenter's chart is
+          # gone and its CRDs with it — the check then reports "nothing to drain" and
+          # the orphaned instances it exists to catch are never touched. Observed in
+          # run 33901410299: the step succeeded and i-0ff9a43642a09206e, tagged
+          # karpenter.sh/nodepool, stayed running and blocked the subnet.
+          #
+          # Deleting a NodePool needs the CRD. Terminating an orphaned instance does
+          # not, and the tags that identify one outlive every Kubernetes object.
           if kubectl get crd nodepools.karpenter.sh >/dev/null 2>&1; then
-            echo "::group::draining Karpenter NodePools"
             kubectl delete nodepools --all --timeout=10m || true
-
-            # Termination is asynchronous; poll rather than trust the delete to have
-            # finished the work it started.
-            KARPENTER_FILTERS='--filters Name=tag:karpenter.sh/nodepool,Values=* Name=tag:kubernetes.io/cluster/'"$CLUSTER"',Values=owned Name=instance-state-name,Values=pending,running,stopping,stopped'
-
-            IDS=""
-            for i in $(seq 1 20); do
-              # shellcheck disable=SC2086
-              IDS=$(aws ec2 describe-instances $KARPENTER_FILTERS \
-                    --query "Reservations[].Instances[].InstanceId" --output text) || {
-                echo "  could not list instances; aborting rather than guessing" >&2
-                exit 1
-              }
-              [ -z "$IDS" ] && { echo "  no Karpenter instances left"; break; }
-              echo "  waiting on: $IDS"
-              sleep 15
-            done
-
-            # Karpenter is the right thing to terminate its own nodes, and it is not
-            # the only thing that can. If instances survive the wait, terminate them
-            # here.
-            #
-            # This is not impatience — it is the recovery case. A destroy that failed
-            # partway leaves a cluster whose workload layer is already gone, so there
-            # is no Karpenter controller left to drain anything: the NodePool delete
-            # above is a no-op, the instances sit there, and the subnet delete fails
-            # on them twenty minutes later. Observed in run 33894400089, where this
-            # loop watched one instance for a full ten minutes and then moved on
-            # without saying it had given up.
-            #
-            # The targets are named by two tags, so this cannot reach the bastion or
-            # the system pool even if both are in the same VPC.
-            if [ -n "$IDS" ]; then
-              echo "  Karpenter did not terminate these; doing it directly: $IDS"
-              # shellcheck disable=SC2086
-              aws ec2 terminate-instances --instance-ids $IDS >/dev/null || {
-                echo "  could not terminate $IDS" >&2
-                exit 1
-              }
-              # shellcheck disable=SC2086
-              aws ec2 wait instance-terminated --instance-ids $IDS || {
-                echo "  instances did not reach terminated state" >&2
-                exit 1
-              }
-              echo "  terminated"
-            fi
-            echo "::endgroup::"
           else
-            echo "no Karpenter CRDs; nothing to drain"
+            echo "  no Karpenter CRDs; checking for instances anyway"
           fi
+
+          # Termination is asynchronous; poll rather than trust the delete to have
+          # finished the work it started.
+          KARPENTER_FILTERS="--filters Name=tag:karpenter.sh/nodepool,Values=* Name=tag:kubernetes.io/cluster/$CLUSTER,Values=owned Name=instance-state-name,Values=pending,running,stopping,stopped"
+
+          IDS=""
+          for i in $(seq 1 20); do
+            # shellcheck disable=SC2086
+            IDS=$(aws ec2 describe-instances $KARPENTER_FILTERS \
+                  --query "Reservations[].Instances[].InstanceId" --output text) || {
+              echo "  could not list instances; aborting rather than guessing" >&2
+              exit 1
+            }
+            [ -z "$IDS" ] && { [ "$i" = "1" ] && echo "  no Karpenter instances" || echo "  no Karpenter instances left"; break; }
+            echo "  waiting on: $IDS"
+            sleep 15
+          done
+
+          # Karpenter is the right thing to terminate its own nodes, and it is not
+          # the only thing that can. If instances survive the wait — or if there was
+          # never a controller to ask — terminate them here.
+          #
+          # The targets are named by two tags, so this cannot reach the bastion or
+          # the system pool even though both sit in the same VPC.
+          if [ -n "$IDS" ]; then
+            echo "  Karpenter did not terminate these; doing it directly: $IDS"
+            # shellcheck disable=SC2086
+            aws ec2 terminate-instances --instance-ids $IDS >/dev/null || {
+              echo "  could not terminate $IDS" >&2
+              exit 1
+            }
+            # shellcheck disable=SC2086
+            aws ec2 wait instance-terminated --instance-ids $IDS || {
+              echo "  instances did not reach terminated state" >&2
+              exit 1
+            }
+            echo "  terminated"
+          fi
+          echo "::endgroup::"
 
           echo "::group::deleting Argo CD Applications"
           kubectl delete applications --all -n argocd --timeout=5m || true
