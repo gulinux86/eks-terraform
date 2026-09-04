@@ -162,7 +162,7 @@ jobs:
           #
           # Same principle the rest of this step follows: delete what owns AWS
           # resources while the thing that owns it is alive.
-          echo "::group::draining Karpenter NodePools"
+          echo "::group::deleting Karpenter NodePools"
 
           # The CRD gates the NodePool delete and nothing else.
           #
@@ -179,45 +179,7 @@ jobs:
           if kubectl get crd nodepools.karpenter.sh >/dev/null 2>&1; then
             kubectl delete nodepools --all --timeout=10m || true
           else
-            echo "  no Karpenter CRDs; checking for instances anyway"
-          fi
-
-          # Termination is asynchronous; poll rather than trust the delete to have
-          # finished the work it started.
-          KARPENTER_FILTERS="--filters Name=tag:karpenter.sh/nodepool,Values=* Name=tag:kubernetes.io/cluster/$CLUSTER,Values=owned Name=instance-state-name,Values=pending,running,stopping,stopped"
-
-          IDS=""
-          for i in $(seq 1 20); do
-            # shellcheck disable=SC2086
-            IDS=$(aws ec2 describe-instances $KARPENTER_FILTERS \
-                  --query "Reservations[].Instances[].InstanceId" --output text) || {
-              echo "  could not list instances; aborting rather than guessing" >&2
-              exit 1
-            }
-            [ -z "$IDS" ] && { [ "$i" = "1" ] && echo "  no Karpenter instances" || echo "  no Karpenter instances left"; break; }
-            echo "  waiting on: $IDS"
-            sleep 15
-          done
-
-          # Karpenter is the right thing to terminate its own nodes, and it is not
-          # the only thing that can. If instances survive the wait — or if there was
-          # never a controller to ask — terminate them here.
-          #
-          # The targets are named by two tags, so this cannot reach the bastion or
-          # the system pool even though both sit in the same VPC.
-          if [ -n "$IDS" ]; then
-            echo "  Karpenter did not terminate these; doing it directly: $IDS"
-            # shellcheck disable=SC2086
-            aws ec2 terminate-instances --instance-ids $IDS >/dev/null || {
-              echo "  could not terminate $IDS" >&2
-              exit 1
-            }
-            # shellcheck disable=SC2086
-            aws ec2 wait instance-terminated --instance-ids $IDS || {
-              echo "  instances did not reach terminated state" >&2
-              exit 1
-            }
-            echo "  terminated"
+            echo "  no Karpenter CRDs"
           fi
           echo "::endgroup::"
 
@@ -238,6 +200,73 @@ jobs:
             kubectl delete applications --all -n argocd --timeout=2m || true
             echo "::endgroup::"
           fi
+
+      # Deliberately its own step, and deliberately not gated on a live cluster.
+      #
+      # The step above needs one: freezing Argo CD, deleting Applications and
+      # deleting NodePools are all Kubernetes operations. This is not. An instance
+      # Karpenter launched is identified by AWS tags that outlive every Kubernetes
+      # object, and the case that matters most is precisely the one where the
+      # cluster is already gone.
+      #
+      # Folding it into the drain put it behind `no live cluster; nothing to drain`,
+      # so a destroy that had already removed the EKS control plane skipped the
+      # cleanup entirely and failed twenty minutes later on a subnet an orphaned
+      # instance was holding (runs 33901410299 and 33903367132).
+      #
+      # In the normal path Karpenter has just been asked to drain its nodes and is
+      # still running, so the poll below simply waits and finds nothing to do.
+      - name: Terminate Karpenter instances
+        if: contains(env.LAYERS, 'foundation')
+        run: |
+          set -uo pipefail
+          CLUSTER=$(terraform -chdir=foundation init -input=false \
+            -backend-config="environments/${ENVIRONMENT}/backend.hcl" >/dev/null 2>&1 \
+            && terraform -chdir=foundation output -raw cluster_name 2>/dev/null || true)
+          case "$CLUSTER" in
+            ""|*[!a-zA-Z0-9_-]*) CLUSTER="" ;;
+          esac
+          [ -n "$CLUSTER" ] || { echo "no cluster name in state; nothing to look for"; exit 0; }
+
+          # Termination is asynchronous; poll rather than trust the delete to have
+          # finished the work it started.
+          KARPENTER_FILTERS="--filters Name=tag:karpenter.sh/nodepool,Values=* Name=tag:kubernetes.io/cluster/$CLUSTER,Values=owned Name=instance-state-name,Values=pending,running,stopping,stopped"
+
+          IDS=""
+          for i in $(seq 1 20); do
+          # shellcheck disable=SC2086
+          IDS=$(aws ec2 describe-instances $KARPENTER_FILTERS \
+                --query "Reservations[].Instances[].InstanceId" --output text) || {
+            echo "  could not list instances; aborting rather than guessing" >&2
+            exit 1
+          }
+          [ -z "$IDS" ] && { [ "$i" = "1" ] && echo "  no Karpenter instances" || echo "  no Karpenter instances left"; break; }
+          echo "  waiting on: $IDS"
+          sleep 15
+          done
+
+          # Karpenter is the right thing to terminate its own nodes, and it is not
+          # the only thing that can. If instances survive the wait — or if there was
+          # never a controller to ask — terminate them here.
+          #
+          # The targets are named by two tags, so this cannot reach the bastion or
+          # the system pool even though both sit in the same VPC.
+          if [ -n "$IDS" ]; then
+          echo "  Karpenter did not terminate these; doing it directly: $IDS"
+          # shellcheck disable=SC2086
+          aws ec2 terminate-instances --instance-ids $IDS >/dev/null || {
+            echo "  could not terminate $IDS" >&2
+            exit 1
+          }
+          # shellcheck disable=SC2086
+          aws ec2 wait instance-terminated --instance-ids $IDS || {
+            echo "  instances did not reach terminated state" >&2
+            exit 1
+          }
+          echo "  terminated"
+          fi
+          echo "::endgroup::"
+
 
       # Destroyed before foundation: this layer depends on foundation's state and on
       # a live cluster endpoint. It is also what removes the platform ALB, which is
