@@ -151,6 +151,41 @@ jobs:
           done
           echo "::endgroup::"
 
+          # Karpenter first, while its controller is still running.
+          #
+          # Deleting a NodePool asks Karpenter to cordon, drain and terminate the
+          # nodes it created. Only Karpenter can do that, so this has to happen
+          # before the Application that installs Karpenter is deleted below — the
+          # first version of this ran inside `Destroy foundation`, three steps later,
+          # by which point the controller was gone and two nodes were left running
+          # with their NodeClaims stuck.
+          #
+          # Same principle the rest of this step follows: delete what owns AWS
+          # resources while the thing that owns it is alive.
+          if kubectl get crd nodepools.karpenter.sh >/dev/null 2>&1; then
+            echo "::group::draining Karpenter NodePools"
+            kubectl delete nodepools --all --timeout=10m || true
+
+            # Termination is asynchronous; poll rather than trust the delete to have
+            # finished the work it started.
+            for i in $(seq 1 40); do
+              N=$(aws ec2 describe-instances \
+                    --filters "Name=tag:karpenter.sh/nodepool,Values=*" \
+                              "Name=tag:kubernetes.io/cluster/$CLUSTER,Values=owned" \
+                              "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+                    --query "length(Reservations[].Instances[])" --output text) || {
+                echo "  could not list instances; aborting rather than guessing" >&2
+                exit 1
+              }
+              [ "$N" = "0" ] && { echo "  no Karpenter instances left"; break; }
+              echo "  $N still terminating"
+              sleep 15
+            done
+            echo "::endgroup::"
+          else
+            echo "no Karpenter CRDs; nothing to drain"
+          fi
+
           echo "::group::deleting Argo CD Applications"
           kubectl delete applications --all -n argocd --timeout=5m || true
           echo "::endgroup::"
@@ -259,14 +294,22 @@ jobs:
             FAIL=1
           fi
 
-          # Unattached ENIs hold a subnet exactly as an attached one does. This
-          # catches one left over from an earlier run; it cannot catch one created
-          # by a node that is still alive at this point, because the ENI is in use
-          # and correctly invisible here. Those are swept in `Destroy foundation`,
-          # after the node group is gone — see the comment there.
+          # Unattached ENIs hold a subnet exactly as an attached one does — but only
+          # the ones nothing is going to remove.
+          #
+          # Interfaces tagged eks:eni:owner=amazon-vpc-cni are excluded, because the
+          # sweep in `Destroy foundation` polls for exactly those and deletes them.
+          # Including them here blocked a healthy teardown: the drain step had just
+          # terminated two Karpenter nodes, their interfaces were still being
+          # released, and this check — which looks once, unlike the sweep — caught
+          # one mid-flight. The interface was gone on its own minutes later.
+          #
+          # Release lags termination. The sweep polls for that reason; this does not,
+          # so it must not judge the interfaces the sweep owns.
           ENIS=$(aws ec2 describe-network-interfaces \
                  --filters "Name=vpc-id,Values=$VPC" "Name=status,Values=available" \
-                 --query "NetworkInterfaces[].NetworkInterfaceId" --output text) || FAIL=1
+                 --query "NetworkInterfaces[?!(Tags[?Key=='eks:eni:owner' && Value=='amazon-vpc-cni'])].NetworkInterfaceId" \
+                 --output text) || FAIL=1
           if [ -n "$ENIS" ]; then
             echo "  BLOCKING unattached ENIs: $ENIS" >&2
             FAIL=1
@@ -327,52 +370,6 @@ jobs:
             vpc-*) echo "vpc from foundation outputs: $VPC" ;;
             *)     VPC=""; echo "no vpc_id in foundation outputs" ;;
           esac
-
-          # Karpenter's nodes go before the node group, and before the sweep.
-          #
-          # They are EC2 instances outside Terraform state, so their interfaces hold
-          # subnets exactly as the CNI's leftovers do (ARCHITECTURE.md §11) — the same
-          # failure class from a second source. Deleting a NodePool asks Karpenter to
-          # cordon, drain and terminate what it created, and the controller is still
-          # running here to do it. Ordered ahead of the sweep so the interfaces those
-          # instances release are gone by the time it looks.
-          #
-          # Unlike the drain this workflow needed for ingress, nothing here depends on
-          # an operator's cascade semantics: an instance carrying the discovery tag
-          # either exists or it does not.
-          CLUSTER=$(terraform -chdir=foundation output -raw cluster_name 2>/dev/null || true)
-          case "$CLUSTER" in
-            ""|*[!a-zA-Z0-9_-]*) CLUSTER="" ;;
-          esac
-
-          if [ -n "$CLUSTER" ] && aws eks describe-cluster --name "$CLUSTER" >/dev/null 2>&1; then
-            aws eks update-kubeconfig --region us-east-1 --name "$CLUSTER" >/dev/null
-
-            echo "::group::draining Karpenter NodePools"
-            # A cluster that never had Karpenter has no such CRD, which is not an
-            # error — this workflow tears down clusters from before it existed.
-            if kubectl get crd nodepools.karpenter.sh >/dev/null 2>&1; then
-              kubectl delete nodepools --all --timeout=10m || true
-
-              # Termination is asynchronous. Poll the instances rather than trust the
-              # delete to have finished the work it started.
-              for i in $(seq 1 40); do
-                N=$(aws ec2 describe-instances \
-                      --filters "Name=tag:karpenter.sh/discovery,Values=$CLUSTER" \
-                                "Name=instance-state-name,Values=pending,running,stopping,stopped" \
-                      --query "length(Reservations[].Instances[])" --output text) || {
-                  echo "  could not list instances; aborting rather than guessing" >&2
-                  exit 1
-                }
-                [ "$N" = "0" ] && { echo "  no Karpenter instances left"; break; }
-                echo "  $N still terminating"
-                sleep 15
-              done
-            else
-              echo "  no Karpenter CRDs; nothing to drain"
-            fi
-            echo "::endgroup::"
-          fi
 
           echo "::group::terraform destroy — node group first"
           terraform -chdir=foundation destroy -auto-approve -input=false \
