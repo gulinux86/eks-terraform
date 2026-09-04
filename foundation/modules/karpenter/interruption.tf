@@ -80,9 +80,25 @@ resource "aws_cloudwatch_event_rule" "interruption" {
   tags = var.tags
 }
 
+# Keyed on the static map, not on the rules resource.
+#
+# `for_each = aws_cloudwatch_event_rule.interruption` reads naturally and breaks
+# whenever the rules do not already exist: Terraform cannot know the map's keys
+# until apply, and refuses to plan at all —
+#
+#   Invalid for_each argument … will be known only after apply
+#
+# It never surfaced during a normal apply, because the rules are created before
+# anything reads them. It surfaced the first time someone ran `terraform import`
+# against a state where the rules had been destroyed, and it took the whole
+# module with it: import, plan and apply all fail the same way, on a resource
+# that has nothing to do with what is being imported.
+#
+# local.interruption_events is a literal, so its keys are known at plan time
+# regardless of what exists. The rules are then indexed by that key.
 resource "aws_cloudwatch_event_target" "interruption" {
-  for_each = aws_cloudwatch_event_rule.interruption
+  for_each = local.interruption_events
 
-  rule = each.value.name
+  rule = aws_cloudwatch_event_rule.interruption[each.key].name
   arn  = aws_sqs_queue.interruption.arn
 }
