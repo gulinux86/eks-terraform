@@ -167,7 +167,12 @@ through `terraform_remote_state`.
   - **Trade-off:** managed node groups are simpler and AWS-maintained but less
     flexible than self-managed ASGs or Karpenter.
   - **The node group is the system pool, and stays.** Karpenter runs in pods and
-    cannot host itself, so something must exist before it does. Its AWS-side
+    cannot host itself, so something must exist before it does. AWS states it
+    directly — *"Do not run Karpenter on a node that is managed by Karpenter"* — and
+    recommends at minimum one small node group with one worker. Its current sizing
+    (`desired_size = 2`) was chosen for Argo CD's pod count against the VPC CNI's
+    ENI-derived ceiling, not measured against what the pool now needs; whether it
+    can shrink is an open question, not a settled answer. Its AWS-side
     prerequisites live in `modules/karpenter`; the controller, NodePools and
     EC2NodeClasses are delivered by Argo CD from the platform GitOps repository —
     Terraform provides only what Kubernetes cannot create for itself:
@@ -189,9 +194,20 @@ through `terraform_remote_state`.
       Identity binds role to ServiceAccount from the AWS side, so nothing crosses
       the boundary. It needs the `eks-pod-identity-agent` add-on: without it the
       association exists and silently delivers no credentials.
-    - The controller's `iam:PassRole` names one role and `TerminateInstances` is
-      conditioned on the discovery tag — unscoped, either would let the controller
-      launch instances carrying any role, or terminate the bastion.
+    - The controller's `iam:PassRole` names one role, and `TerminateInstances` is
+      conditioned on **two** tags Karpenter writes to its own instances:
+      `kubernetes.io/cluster/<name>=owned` and `karpenter.sh/nodepool=*`. Neither is
+      sufficient alone — EKS puts the first on managed node group instances too, so
+      it is the second that keeps the system pool and the bastion out of reach.
+      - **This was conditioned on `karpenter.sh/discovery` first, and authorised
+        nothing.** That tag is on the *subnets and security groups Karpenter
+        selects*; it never reaches an instance, and it cannot be put there —
+        Karpenter reserves the `karpenter.sh/` prefix and drops such keys from an
+        `EC2NodeClass`'s `tags` silently, with no error, warning or event. Two
+        things had been written against a tag that could not exist: this condition,
+        and the teardown's instance sweep, which polled for it and therefore always
+        reported success. A neighbouring custom tag (`ManagedBy`) was applied
+        normally, which is what made it hard to see.
   - **Instance `Name` tags come from a launch template.** Nothing else applies them
     at launch: `tags` on `aws_eks_node_group` land on the node group, and an
     `aws_autoscaling_group_tag` can only be created *after* the node group exists —
@@ -472,10 +488,23 @@ destroy cannot be checked before the destroy starts.
 
 | Step | Why it is where it is |
 |---|---|
-| Drain cluster-owned state | Clears `syncPolicy.automated` on every Argo CD `Application` **before** deleting anything — `selfHeal` treats a deletion as an instruction to recreate. Then deletes the Applications, then strips finalizers from any that survive. |
+| Drain cluster-owned state | Clears `syncPolicy.automated` on every Argo CD `Application` **before** deleting anything — `selfHeal` treats a deletion as an instruction to recreate. Then deletes the Karpenter `NodePool`s, **then** the Applications: deleting a NodePool is a request to Karpenter, and the Application that installs Karpenter is deleted moments later. Finally strips finalizers from any Application that survives. |
+| Terminate Karpenter instances | Its own step, and deliberately **not** gated on a live cluster. Everything above is a Kubernetes operation; this one identifies instances by AWS tags that outlive every Kubernetes object, and the case that matters most is the one where the cluster is already gone. On the normal path Karpenter has just drained its own nodes and this finds nothing — which is the signal that the ordering above is right. |
 | Destroy workload | Removes the platform ALB, which is why the preflight runs after it and not before. |
 | Preflight | Asserts the VPC holds nothing unowned, in seconds, rather than letting it surface as a `DependencyViolation` forty minutes in. |
-| Destroy foundation | Destroys the node group **first**, on its own, sweeps the interfaces that releases, then destroys the rest. |
+| Destroy foundation | Three passes, each opening a window between "Terraform removed X" and "Terraform needs what X's debris is holding": node group → sweep CNI interfaces → cluster → sweep the security groups EKS leaves → everything else. |
+
+The debris pattern, twice, at two levels:
+
+```
+Terraform destroys      AWS leaves behind        which holds
+──────────────────      ──────────────────       ───────────
+managed node group  →   VPC CNI interfaces   →   the subnets
+EKS cluster         →   eks-cluster-sg-<id>  →   the VPC
+```
+
+Both are handled the same way and neither can be checked before the destroy starts,
+because in both cases the debris does not exist until Terraform creates it.
 
 ### Things that are true and cost a day to learn
 
@@ -505,14 +534,32 @@ destroy cannot be checked before the destroy starts.
 - **Identify leftovers by ownership, never by name.** Three checks here originally
   matched a name prefix (`k8s-`, `aws-K8S-`) or a count, and all three were wrong
   in a state nobody had seen yet. Tags answer the question a prefix only guesses at.
+- **Read the state, not the outputs.** `terraform output` is a projection, and it
+  failed twice in different ways: once returning `Warning: No outputs found` *as the
+  value*, and once returning nothing at all because `-target` had rewritten the
+  outputs while the resource sat in state undeleted. The VPC id now comes from
+  `terraform show -json`, which reads the resource.
+- **Every guard here was written for the normal case and met in the recovery case.**
+  Six in a row: a `k8s-` prefix, a non-zero output count, a reserved tag, the
+  presence of a CRD, a live cluster, a cluster name in state. Each described what is
+  true during a healthy teardown and excluded exactly the situation the code existed
+  for. The rule that came out of it: **the teardown may depend only on what survives
+  a partial destroy** — AWS tags and the Terraform state — and must treat everything
+  Kubernetes-side as optional.
+- **Do not cancel a `deploy` or `destroy` once it has left the queue.** GitHub's API
+  reports `queued` for some time after a job is really running, so a run that looks
+  stuck may be mid-apply. Cancelling one left an EKS cluster, a VPC endpoint and a
+  route table in AWS but not in state, and reconciling that took longer than the
+  original run would have. `terraform import` is the way back for anything that has
+  an importable identity.
 
 ### What is not covered yet
 
-- **Karpenter (Phase 2).** Its instances are EC2 outside Terraform state and their
-  interfaces hold subnets — the same class as the CNI's, arriving from a different
-  source. The drain has an obvious place for a NodePool drain, and unlike the
-  failures above that one is deterministic polling rather than a bet on how an
-  operator sequences itself.
+- ~~**Karpenter (Phase 2).**~~ Covered. NodePools are drained while the controller
+  is still running, and a separate step terminates by tag whatever survives —
+  including in a recovery run where there is no controller left to ask. Verified
+  with two Karpenter nodes live at the start of a destroy (run 33995714269): the
+  drain removed them and the terminate step found nothing to do.
 - **The ENI sweep's delete branch is unexercised.** Two consecutive clean cycles
   both reported `none orphaned`, because no interface was stranded either time. The
   orphan is timing-dependent. The code is correct by inspection and its failures are
@@ -527,7 +574,10 @@ destroy cannot be checked before the destroy starts.
 | API endpoint | Public + CIDR allowlist | Private-only + in-VPC runners / VPN |
 | `public_access_cidrs` | `0.0.0.0/0` default | Office/CI egress ranges only |
 | Egress | NAT + overlapping endpoints | Drop NAT, complete endpoint set |
-| Scaling | Fixed managed node group | Karpenter (+ small system node group) |
+| Scaling | Karpenter + a fixed system node group | Shrink the system pool to what it actually needs (its size was chosen for Argo CD, never re-measured); split the single NodePool by workload class with weights |
+| Node instance types | An explicit two-type list, because the account is on the **AWS Free Plan** and EC2 refuses anything not free-tier eligible | Categories and generations, which is what AWS recommends and what Spot needs to draw from a wide pool |
+| Node AMIs | `al2023@latest` — patches arrive unattended, and two syncs months apart give different nodes with no diff in Git | Pin the alias and bump deliberately |
+| Consolidation | On (`WhenEmptyOrUnderutilized`) | Requires `requests=limits` for non-CPU resources on hosted workloads; belongs in the application repository's conventions |
 | Core add-ons | vpc-cni/coredns/kube-proxy managed + pinned | + dedicated VPC-CNI IRSA, network policy, prefix delegation |
 | Cluster add-ons | ALB controller (IRSA + Helm) | + External Secrets, ExternalDNS, policy agents |
 | Ingress edge | Internal ALB owned by Terraform, one shared gateway | Internet-facing scheme + ACM on the listener + WAF; a second edge per team would change the ownership trade (§3) |
