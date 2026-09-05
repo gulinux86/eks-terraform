@@ -53,7 +53,7 @@ the cluster attaches through a `TargetGroupBinding`. That is what makes
 | Layer        | Responsibility                                                                   | State                                |
 |--------------|----------------------------------------------------------------------------------|--------------------------------------|
 | `bootstrap`  | One-time per account: KMS-encrypted S3 **state bucket** + GitHub Actions **OIDC roles** | local state — **not** committed (`*.tfstate` is gitignored) |
-| `foundation` | VPC, subnets, NAT/IGW, EKS, KMS, OIDC, managed node group, bastion, VPC endpoints, core add-ons (vpc-cni/coredns/kube-proxy) | `foundation/<env>/terraform.tfstate` |
+| `foundation` | VPC, subnets, NAT/IGW, EKS, KMS, OIDC, managed node group (the system pool), bastion, VPC endpoints, core add-ons, and Karpenter's AWS-side prerequisites — IAM, the interruption queue, discovery tags | `foundation/<env>/terraform.tfstate` |
 | `workload`   | Cluster add-ons — AWS Load Balancer Controller (IRSA + Helm), the platform ingress ALB, the default StorageClass, and Argo CD with the AppProjects and root Application that hand the cluster over | `workload/<env>/terraform.tfstate`   |
 
 `bootstrap` runs once to create the backend the other layers use. The `workload`
@@ -129,7 +129,7 @@ kubectl get nodes
 | `terraform-test.yml`    | PR (`**.tf`/`**.tftest.hcl`), `workflow_dispatch` | Native `terraform test` on critical modules; mocked providers → no AWS creds, no infra |
 | `security-scan.yml`     | PR (Terraform paths), `workflow_dispatch`        | Trivy IaC scan (`config` mode); fails on HIGH/CRITICAL; uploads SARIF to the Security tab |
 | `terraform-deploy.yml`  | `workflow_dispatch` (env + layer)                | **Gated** by `terraform test` + Trivy, then `plan -out` + `apply` of the saved plan (`foundation`→`workload`); `prod` requires reviewer approval |
-| `terraform-destroy.yml` | `workflow_dispatch` (env + layer, typed confirm) | Ordered teardown: drain the cluster → destroy `workload` → preflight the VPC → destroy the node group → sweep orphaned ENIs → destroy the rest of `foundation`; `prod` requires reviewer approval |
+| `terraform-destroy.yml` | `workflow_dispatch` (env + layer, typed confirm) | Ordered teardown: drain the cluster (NodePools before Applications) → terminate any surviving Karpenter instance → destroy `workload` → preflight the VPC → node group → sweep interfaces → cluster → sweep security groups → the rest of `foundation`. See ARCHITECTURE.md §11 for why each step sits where it does; `prod` requires reviewer approval |
 
 - AWS authentication via **OIDC** (no static keys), through **two roles split by
   what the job does** — see [Pipeline access](#pipeline-access-two-roles) below.
