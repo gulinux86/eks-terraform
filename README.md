@@ -1,251 +1,169 @@
 # eks-terraform
 
-Provisioning of a **private Amazon EKS** cluster with Terraform, organized into
-two independent state layers (`foundation` and `workload`) and shipped with a
-GitHub Actions CI/CD pipeline.
+A private Amazon EKS platform built with Terraform, handed over to Argo CD.
 
-> **Design & trade-offs:** see [ARCHITECTURE.md](./ARCHITECTURE.md).
-> Per-module/per-layer inputs and outputs are documented in each directory's
-> `README.md` (generated with [terraform-docs](https://terraform-docs.io)).
+Terraform provisions the network, the cluster and the AWS-side plumbing, then stops
+at a deliberate boundary: two Argo CD `AppProject`s and a single root `Application`.
+Everything above that arrives from
+[`platform-gitops`](https://github.com/gulinux86/platform-gitops) — Istio in ambient
+mode, cert-manager, Gateway API, Karpenter.
 
-## Architecture at a glance
+`ARCHITECTURE.md` records every design decision and what it costs. Read the relevant
+section before changing a security-shaped default.
 
-```
-                         ┌─────────────────────────────────────────────┐
-                         │                    VPC                       │
-                         │   10.0.0.0/16 (hml)  /  10.1.0.0/16 (prod)   │
-                         │                                              │
-   ┌──────────┐  IGW     │  ┌─────────── public ─────────────┐         │
-   │ Internet │──────────┼─▶│  NAT-1a        NAT-1b           │         │
-   └──────────┘          │  └────────────────────────────────┘         │
-                         │  ┌─────────── private ────────────┐         │
-                         │  │  EKS API (private ENIs)         │         │
-                         │  │  Managed node group (AL2023)    │         │
-                         │  │  Bastion (access via SSM)       │         │
-                         │  │  VPC interface/gateway endpoints│         │
-                         │  │  Platform ALB (internal)        │         │
-                         │  └────────────────────────────────┘         │
-                         └─────────────────────────────────────────────┘
-
-  foundation/  ──(terraform_remote_state)──▶  workload/
-  network, EKS, KMS, OIDC, nodes, bastion       ALB Controller, platform ingress,
-                                                storage, Argo CD + the handover
-```
-
-The ingress edge is **owned by Terraform**, not created by a controller reacting to
-a manifest: an internal ALB and its target group live in the `workload` layer, and
-the cluster attaches through a `TargetGroupBinding`. That is what makes
-`terraform destroy` able to remove it in dependency order — see
-[ARCHITECTURE.md §3](ARCHITECTURE.md) and the teardown notes in §11.
+## At a glance
 
 ```
-  platform-gitops (Argo CD)          eks-terraform (Terraform)
-  ─────────────────────────          ─────────────────────────
-  Gateway  ──istiod──▶ Service       aws_lb (internal)
-                       ClusterIP     aws_lb_target_group
-                          ▲          aws_lb_listener
-                          └──────────  TargetGroupBinding
-                             registers pod IPs; owns nothing
+bootstrap/    S3 state bucket (KMS) + GitHub OIDC roles          local state, run once
+foundation/   VPC · EKS · KMS · system node group · bastion      ─┐
+              VPC endpoints · core add-ons · Karpenter IAM        │ remote_state
+workload/     ALB controller · platform ingress ALB · storage    ←┘
+              Argo CD + the handover
+                        │
+                        ▼
+platform-gitops         Gateway API · cert-manager · Istio ambient · Karpenter
 ```
+
+**Properties worth knowing:**
+
+- **Nothing is internet-facing.** Compute is private, the ingress ALB is `internal`,
+  and the bastion has no public IP — access is SSM Session Manager only.
+- **The ingress edge belongs to Terraform**, not to a controller reacting to a
+  manifest. That is what makes the teardown ordered rather than hopeful
+  (ARCHITECTURE.md §3, §11).
+- **Capacity is on demand.** A managed node group hosts the controllers; Karpenter
+  provisions everything else and consolidates it away when idle.
+- **Two IAM roles**, split on read/write. A pull-request plan cannot mutate AWS.
 
 ## Layers
 
-| Layer        | Responsibility                                                                   | State                                |
-|--------------|----------------------------------------------------------------------------------|--------------------------------------|
-| `bootstrap`  | One-time per account: KMS-encrypted S3 **state bucket** + GitHub Actions **OIDC roles** | local state — **not** committed (`*.tfstate` is gitignored) |
-| `foundation` | VPC, subnets, NAT/IGW, EKS, KMS, OIDC, managed node group (the system pool), bastion, VPC endpoints, core add-ons, and Karpenter's AWS-side prerequisites — IAM, the interruption queue, discovery tags | `foundation/<env>/terraform.tfstate` |
-| `workload`   | Cluster add-ons — AWS Load Balancer Controller (IRSA + Helm), the platform ingress ALB, the default StorageClass, and Argo CD with the AppProjects and root Application that hand the cluster over | `workload/<env>/terraform.tfstate`   |
+| Layer | Responsibility | State |
+|---|---|---|
+| `bootstrap` | Once per account: KMS-encrypted state bucket + OIDC roles | local, **not** committed |
+| `foundation` | VPC, subnets, NAT/IGW, EKS, KMS, OIDC, system node group, bastion, VPC endpoints, core add-ons, Karpenter's AWS prerequisites | `foundation/<env>/terraform.tfstate` |
+| `workload` | ALB controller, the platform ingress ALB, default StorageClass, Argo CD and the handover | `workload/<env>/terraform.tfstate` |
 
-`bootstrap` runs once to create the backend the other layers use. The `workload`
-layer reads `foundation` outputs through `terraform_remote_state`, so
-**`foundation` is always applied before `workload`**. Cluster Kubernetes version
-is **1.35** (set per environment in `environments/<env>/terraform.tfvars`).
-
-## Prerequisites
-
-- Terraform `~> 1.10`
-- AWS CLI configured
-- An S3 bucket for state (see `environments/<env>/backend.hcl`)
+`workload` reads `foundation` outputs through `terraform_remote_state`, so
+**`foundation` always applies first**. `foundation/outputs.tf` is that contract;
+`scripts/check-layer-contract.sh` guards it in CI. Kubernetes version and the add-on
+pins are set per environment in `environments/<env>/terraform.tfvars` — **bump them
+together**.
 
 ## Usage
 
-Each layer uses a partial backend: `bucket`/`key`/`region` come from
-`environments/<env>/backend.hcl`.
+Requires Terraform `~> 1.10` and AWS credentials. Each layer uses a partial backend:
+`bucket`/`key`/`region` come from `environments/<env>/backend.hcl`.
 
 ```bash
-# 0) bootstrap (one-time per account): creates the KMS-encrypted state bucket
-#    and the GitHub Actions OIDC role. Every principal that runs Terraform needs
-#    kms:Decrypt / kms:GenerateDataKey on the state CMK created here.
-terraform -chdir=bootstrap init
-terraform -chdir=bootstrap apply
+# once per account — creates the state bucket the other layers use
+terraform -chdir=bootstrap init && terraform -chdir=bootstrap apply
 
-# 1) foundation
+# then, per environment
 terraform -chdir=foundation init  -backend-config=environments/hml/backend.hcl
-terraform -chdir=foundation plan  -var-file=environments/hml/terraform.tfvars
 terraform -chdir=foundation apply -var-file=environments/hml/terraform.tfvars
 
-# 2) workload (after foundation exists)
-terraform -chdir=workload init  -backend-config=environments/hml/backend.hcl
-terraform -chdir=workload plan  -var-file=environments/hml/terraform.tfvars
-terraform -chdir=workload apply -var-file=environments/hml/terraform.tfvars
+terraform -chdir=workload   init  -backend-config=environments/hml/backend.hcl
+terraform -chdir=workload   apply -var-file=environments/hml/terraform.tfvars
 ```
 
-Swap `hml` for `prod` for the production environment.
+Credential-free checks — what CI runs on pull requests:
+
+```bash
+terraform -chdir=foundation fmt -recursive
+terraform -chdir=foundation init -backend=false && terraform -chdir=foundation validate
+./scripts/check-layer-contract.sh
+trivy config --severity HIGH,CRITICAL --ignorefile .trivyignore .
+
+# module tests: mocked providers, command = plan — no AWS, no infrastructure
+terraform -chdir=foundation/modules/network init -backend=false
+terraform -chdir=foundation/modules/network test
+```
 
 ### Tearing down
 
-**Use `terraform-destroy.yml`, not a local `terraform destroy`.** Removing this
-platform is not the reverse of applying it: controllers inside the cluster create
-AWS resources Terraform never records, and those hold subnets after the cluster is
-gone. The workflow handles that in order — it freezes Argo CD's automation before
-deleting anything, strips finalizers that would hang the Helm uninstall, checks the
-VPC before the destructive part starts, and sweeps the network interfaces a
-terminated node group leaves behind.
+**Use `terraform-destroy.yml`, not a local `terraform destroy`.** Controllers inside
+the cluster create AWS resources Terraform never records, and those hold subnets
+after the cluster is gone. The workflow handles it in order: it freezes Argo CD's
+automation, drains Karpenter's NodePools while the controller is still alive,
+terminates anything that survives, checks the VPC, and then destroys in three passes
+with a sweep between each. A local destroy runs none of that. ARCHITECTURE.md §11 has
+the reasoning and the failures that produced it.
 
-A local destroy runs none of those steps. It works when nothing was stranded, and
-fails with an opaque `DependencyViolation` after most of the platform is gone when
-something was. ARCHITECTURE.md §11 has the details and the failures that produced
-them.
+### Cluster access
 
-### Cluster access via the bastion
-
-The bastion is a private, SSM-only jump host (no public IP, no inbound rules).
-`kubectl` is installed at boot from the Amazon-EKS S3 bucket via the S3 gateway
-endpoint (no internet egress). Helm is **not** on the bastion — Helm releases run
-in the `workload` layer.
+The `hml` API endpoint is public (CIDR-gated), so from a machine with an Access
+Entry:
 
 ```bash
-aws ssm start-session --target <bastion_instance_id>
-# set up kubeconfig for your shell session, then use kubectl:
-aws eks update-kubeconfig --region <region> --name <project_name>-cluster
-kubectl get nodes
+aws eks update-kubeconfig --region us-east-1 --name eks-hml-cluster
 ```
 
-## CI/CD (GitHub Actions)
+Otherwise, through the bastion — no SSH, no public IP, `kubectl` already installed:
 
-| Workflow                | Trigger                                          | What it does                                                                       |
-|-------------------------|--------------------------------------------------|------------------------------------------------------------------------------------|
-| `terraform-plan.yml`    | PR to `master`/`develop`/`main`, `workflow_dispatch` | `fmt` + `validate` + `plan` (matrix over `foundation`/`workload`); comments the plan on the PR |
-| `terraform-test.yml`    | PR (`**.tf`/`**.tftest.hcl`), `workflow_dispatch` | Native `terraform test` on critical modules; mocked providers → no AWS creds, no infra |
-| `security-scan.yml`     | PR (Terraform paths), `workflow_dispatch`        | Trivy IaC scan (`config` mode); fails on HIGH/CRITICAL; uploads SARIF to the Security tab |
-| `terraform-deploy.yml`  | `workflow_dispatch` (env + layer)                | **Gated** by `terraform test` + Trivy, then `plan -out` + `apply` of the saved plan (`foundation`→`workload`); `prod` requires reviewer approval |
-| `terraform-destroy.yml` | `workflow_dispatch` (env + layer, typed confirm) | Ordered teardown: drain the cluster (NodePools before Applications) → terminate any surviving Karpenter instance → destroy `workload` → preflight the VPC → node group → sweep interfaces → cluster → sweep security groups → the rest of `foundation`. See ARCHITECTURE.md §11 for why each step sits where it does; `prod` requires reviewer approval |
+```bash
+aws ssm start-session --target "$(terraform -chdir=foundation output -raw bastion_instance_id)"
+```
 
-- AWS authentication via **OIDC** (no static keys), through **two roles split by
-  what the job does** — see [Pipeline access](#pipeline-access-two-roles) below.
-- `master` is the single deploy source. The environment is chosen on dispatch;
-  pull-request plans always resolve to `hml`. There is no branch per environment.
-- `prod` is protected by a GitHub Environment (required reviewer).
-- The PR checks above can optionally be promoted to **required status checks** on
-  `master` (branch protection) to block merging when they fail — not enforced by
-  default.
+Argo CD is not exposed:
 
-### Pipeline access — two roles
+```bash
+kubectl -n argocd port-forward svc/argocd-server 8080:443
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath='{.data.password}' | base64 -d          # then https://localhost:8080
+```
 
-The workflows do very different things, so they get different credentials. A pull
-request runs the workflow file **from its own branch**, so the job that only needs
-to read must never hold a credential that can write.
+## CI/CD
 
-| Role | Trusted `sub` claim | Permission | Used by |
-|------|---------------------|------------|---------|
-| `github-actions-eks-plan` | `:pull_request`, `:ref:refs/heads/*` | read-only (+ `kms:Decrypt` on the state key) | `terraform-plan` |
-| `github-actions-eks-deploy` | `:environment:<env>` **only** | write | `terraform-deploy`, `terraform-destroy` |
-
-GitHub stamps the `environment:<name>` claim **only** for a job that declares an
-Environment — which the two write workflows do and the plan workflow does not.
-
-**The Environment's deployment-branch policy is load-bearing.** Restricted to
-`master`, GitHub refuses any other branch's job *before it starts*, so no token is
-ever issued. Without it, a pull request could add `environment: hml` to any job and
-mint the deploy claim itself, defeating the split. Required setup:
-
-| Environment | Deployment branches | Required reviewer |
+| Workflow | Trigger | What it does |
 |---|---|---|
-| `hml` | `master` only | no — hml stays fast |
-| `prod` | `master` only | yes (`gulinux86`), **self-review allowed** |
+| `terraform-plan` | PR, dispatch | `fmt`, `validate`, `plan` per layer; comments the plan on the PR |
+| `terraform-test` | PR, dispatch | `terraform test` on critical modules — mocked providers, no credentials |
+| `security-scan` | PR, dispatch | Trivy IaC scan; fails on HIGH/CRITICAL, uploads SARIF |
+| `terraform-deploy` | dispatch (env + layer) | Gated on tests + Trivy, then `plan -out` → `apply tfplan` |
+| `terraform-destroy` | dispatch (env + layer + typed confirm) | Ordered teardown — see §11 |
 
-**Why self-review is allowed on `prod`:** the repository has a single maintainer.
-Disabling self-review with a one-person reviewer list would make production deploys
-impossible — the dispatcher would be the only reviewer and would be refused. What
-remains is a deliberate pause and an attributable approval, not four-eyes. Add a
-second reviewer and disable self-review the moment there is one.
+Deploys are never automatic on merge. `master` is the single deploy source; the
+environment is chosen at dispatch and pull-request plans always resolve to `hml`.
 
-Authorization deliberately lives **outside** the pipeline. An allowlist checked as
-a workflow step would run after the credential was issued, and could be deleted by
-anyone able to edit the workflow — the same people it is meant to constrain.
+**Two roles, split on what the job does.** A pull request runs the workflow file from
+its own branch, so the job that only reads must never hold a credential that writes:
 
-Required secrets, per account:
+| Role | Trusted claim | Permission |
+|---|---|---|
+| `…-eks-plan` | `:pull_request`, `:ref:refs/heads/*` | read-only (+ `kms:Decrypt` on the state key) |
+| `…-eks-deploy` | `:environment:<env>` only | write |
 
-```
-HML_PLAN_ROLE_ARN     HML_DEPLOY_ROLE_ARN
-PROD_PLAN_ROLE_ARN    PROD_DEPLOY_ROLE_ARN   (once the prod account exists)
-```
+GitHub stamps `environment:<name>` only for a job declaring an Environment — which
+the two write workflows do and the plan workflow does not. **The Environment's
+deployment-branch policy is load-bearing:** restricted to `master`, GitHub refuses
+any other branch's job before a token is issued. Without it a pull request could
+declare `environment: hml` and mint the deploy claim itself.
 
-Both come from `bootstrap` outputs (`plan_role_arn`, `deploy_role_arn`). Bootstrap
-is applied **once per account** with `-var environment=hml|prod`, from a
-workstation with administrator credentials — never through the pipeline. The deploy
-role must also appear in that environment's `cluster_admin_role_arns`, or
-`workload` applies lose in-cluster authorization.
+| Environment | Branches | Reviewer |
+|---|---|---|
+| `hml` | `master` | none |
+| `prod` | `master` | required, self-review allowed (single maintainer — see §9) |
 
-### Quality gates — defense in depth
-
-The same tests run as a **PR gate** (block the merge) and again as a **pre-apply
-gate** in `terraform-deploy.yml` (block the apply). Both are env-agnostic, so hml
-and prod get the identical checks.
-
-```
-PR opened ─▶ terraform-plan + terraform-test + security-scan   ← block MERGE
-   │ merge
-   ▼
-deploy (dispatch) ─▶ test ┐
-                          ├─▶ apply  foundation ─▶ workload     ← block APPLY
-                     trivy ┘   (init → plan -out → apply tfplan)
-                                  └ prod: reviewer approval after the gates pass
-```
-
-### Tests & security scanning
-
-Critical modules are guarded by native `terraform test` suites (plan-mode,
-mocked providers — they run with no AWS credentials and create no resources):
-
-```bash
-terraform -chdir=foundation/modules/network init -backend=false
-terraform -chdir=foundation/modules/network test
-terraform -chdir=foundation/modules/cluster init -backend=false
-terraform -chdir=foundation/modules/cluster test
-terraform -chdir=foundation/modules/eks-addons init -backend=false
-terraform -chdir=foundation/modules/eks-addons test
-```
-
-To add coverage for another module, drop a `tests/<name>.tftest.hcl` with a
-`mock_provider "aws" {}` block and `command = plan` assertions, then add the
-module path to the matrix in `terraform-test.yml`.
-
-Run the IaC security scan locally the same way CI does:
-
-```bash
-trivy config --severity HIGH,CRITICAL --ignorefile .trivyignore .
-```
-
-Accepted, documented exceptions live in `.trivyignore` (each with a reason).
-Tighten them for `prod` — see `ARCHITECTURE.md` §12.
+Required secrets per account: `<ENV>_PLAN_ROLE_ARN`, `<ENV>_DEPLOY_ROLE_ARN`.
 
 ## Repository layout
 
 ```
-bootstrap/                # one-time: KMS-encrypted state bucket + OIDC role (local state)
-  main.tf  s3-state.tf  outputs.tf  provider.tf  variables.tf  README.md
-foundation/
-  main.tf  provider.tf  variables.tf  backend.tf  outputs.tf  README.md
-  environments/{hml,prod}/{terraform.tfvars,backend.hcl}
-  modules/{network,cluster,managed-node-group,bastion,vpc-endpoints,eks-addons,karpenter}/
-    tests/*.tftest.hcl    # native terraform test (network, cluster, eks-addons)
-workload/
-  main.tf  provider.tf  variables.tf  backend.tf  README.md
-  environments/{hml,prod}/{terraform.tfvars,backend.hcl}
-  modules/{aws-load-balancer-controller,platform-ingress,storage,argocd,argocd-bootstrap}/
-scripts/check-layer-contract.sh   # foundation outputs vs. what workload consumes
-.github/workflows/        # plan, test, security-scan, deploy, destroy
-.trivyignore              # documented, accepted Trivy exceptions
+bootstrap/     main.tf  s3-state.tf  outputs.tf  variables.tf
+foundation/    main.tf  outputs.tf  variables.tf  backend.tf  provider.tf
+               environments/{hml,prod}/{terraform.tfvars,backend.hcl}
+               modules/{network,cluster,managed-node-group,bastion,
+                        vpc-endpoints,eks-addons,karpenter}/
+workload/      same shape
+               modules/{aws-load-balancer-controller,platform-ingress,
+                        storage,argocd,argocd-bootstrap}/
+scripts/       check-layer-contract.sh
+.github/       plan · test · security-scan · deploy · destroy
+.trivyignore   documented, accepted exceptions — each needs a written reason
 ARCHITECTURE.md
 ```
+
+Module `README.md`s are terraform-docs output under a handwritten title —
+regenerate rather than hand-editing the tables. Test suites live in
+`<module>/tests/*.tftest.hcl`; adding one means adding the module path to the matrix
+in **both** `terraform-test.yml` and the `test` job of `terraform-deploy.yml`.

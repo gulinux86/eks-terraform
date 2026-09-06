@@ -1,500 +1,265 @@
 # Architecture
 
-This document describes the design of the EKS platform provisioned by this
-repository and, more importantly, the **trade-offs** behind each decision. The
-goal is a production-shaped, security-conscious cluster that still fits a
-portfolio/demo budget.
+A private EKS platform, production-shaped on a portfolio budget. This document
+records the decisions and what each one costs. Section numbers are referenced from
+code comments (`see ARCHITECTURE.md §N`) and are stable.
 
 ## 1. High-level topology
 
 ```
-                              AWS Account / Region (us-east-1)
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  VPC  10.0.0.0/16 (hml)  /  10.1.0.0/16 (prod)                                 │
-│                                                                                │
-│   ┌── Public subnets (1a, 1b) ──────────┐   ┌── Private subnets (1a, 1b) ───┐  │
-│   │  Internet Gateway                   │   │  EKS control-plane ENIs       │  │
-│   │  NAT GW 1a   NAT GW 1b   (1 EIP ea) │   │  Managed node group (AL2023)  │  │
-│   │  role: host NAT only (no role/elb)  │   │  Bastion (no public IP)       │  │
-│   └─────────────────────────────────────┘   │  VPC interface endpoints       │  │
-│            │ egress                          │  S3 gateway endpoint           │  │
-│            ▼                                 └────────────────────────────────┘  │
-│        Internet                                       ▲                          │
-│                                          private DNS  │ 443                       │
-│   EKS API endpoint: private + public (CIDR-restrictable)                          │
-└──────────────────────────────────────────────────────────────────────────────┘
+                        AWS account · us-east-1
+┌────────────────────────────────────────────────────────────────────┐
+│ VPC   10.0.0.0/16 (hml)  ·  10.1.0.0/16 (prod)                     │
+│                                                                    │
+│  public 1a/1b                    private 1a/1b                     │
+│  ├ Internet Gateway              ├ EKS control-plane ENIs          │
+│  └ NAT GW per AZ ────egress──▶   ├ Managed node group (system)     │
+│                                  ├ Karpenter nodes (on demand)     │
+│                                  ├ Bastion (SSM only)              │
+│                                  ├ Platform ALB (internal)         │
+│                                  └ VPC endpoints + S3 gateway      │
+└────────────────────────────────────────────────────────────────────┘
 
-State (S3, native locking):
-  foundation/<env>/terraform.tfstate   ──remote_state──▶   workload/<env>/terraform.tfstate
+bootstrap/  → S3 state bucket (KMS) + OIDC roles        local state
+foundation/ → VPC, EKS, KMS, nodes, bastion, endpoints  ─┐
+                                                          │ terraform_remote_state
+workload/   → ALB, ingress edge, storage, Argo CD        ←┘
+                        │
+                        └─ handover ─▶ platform-gitops (Argo CD owns the rest)
 ```
 
 ## 2. Two-layer split (`foundation` + `workload`)
 
-`foundation` owns long-lived infrastructure (VPC, EKS, KMS, OIDC, nodes,
-bastion, endpoints). `workload` owns in-cluster add-ons (today: the AWS Load
-Balancer Controller via Helm + IRSA). `workload` reads `foundation` outputs
-through `terraform_remote_state`.
+`foundation` owns long-lived infrastructure; `workload` owns in-cluster add-ons and
+hands the cluster to Argo CD. `workload` reads `foundation` outputs through
+`terraform_remote_state`.
 
-**Why split:**
-- **Blast radius / state size.** Add-ons change often; the network and control
-  plane rarely do. Separate states mean a bad `workload` apply can never corrupt
-  or lock the `foundation` state.
-- **Provider boundary.** The `kubernetes`/`helm` providers only exist in
-  `workload`. Keeping them out of `foundation` avoids the classic
-  "provider configured from a resource created in the same apply" chicken-and-egg
-  problem.
-- **Lifecycle independence.** You can re-run add-ons without planning the whole
-  platform.
+**Why:**
+- **Provider boundary.** `kubernetes` and `helm` exist only in `workload`. In one
+  state they would be configured from a resource created in the same apply — the
+  classic bootstrap deadlock.
+- **Blast radius.** Add-ons change often, the network rarely. A bad `workload` apply
+  cannot corrupt or lock `foundation` state.
 
-**Trade-offs / cost:**
-- Cross-layer values travel via `terraform_remote_state`, which couples
-  `workload` to `foundation`'s output contract and to its state location.
-- Ordering is manual: `foundation` must apply before `workload` (encoded in the
-  deploy workflow's `both` path).
-- **Alternative considered:** a single state. Simpler wiring, but reintroduces
-  the provider bootstrap problem and a larger blast radius. Rejected.
+**Cost:** `foundation/outputs.tf` becomes an API. Renaming an output passes `fmt`,
+`validate` and every test, and fails at run time in the other layer —
+`scripts/check-layer-contract.sh` compares the two lists in CI. Ordering is manual;
+the deploy workflow encodes it.
 
 ## 3. Networking
 
-- **2 AZs, public + private subnets.** Public subnets host only NAT and the IGW
-  route; all compute is private.
-- **One NAT Gateway per AZ.** AZ-resilient egress.
-  - **Trade-off:** two NAT GWs ≈ 2× the hourly + data cost of a single shared
-    NAT. A single NAT is cheaper but becomes an AZ-level SPOF for egress. For a
-    portfolio that wants to *show* HA intent, per-AZ NAT is the honest choice;
-    for pure cost demos, collapse to one.
-- **Subnet tagging.** Private subnets carry `kubernetes.io/role/internal-elb`.
-  Public subnets deliberately **omit** `kubernetes.io/role/elb`. The tags remain
-  for any load balancer a controller might still create, but they are no longer
-  what keeps the platform off the internet — see the next point.
-- **The ingress load balancer belongs to Terraform, not to a controller.**
-  `workload/modules/platform-ingress` declares an internal ALB, its target group,
-  its listener and its security group. The cluster attaches to it through a
-  `TargetGroupBinding`, a CRD from the AWS Load Balancer Controller that registers
-  and deregisters pod IPs in a target group it does not own.
+- **2 AZs, public + private.** Public subnets host only NAT and the IGW route; all
+  compute is private.
+- **One NAT Gateway per AZ.** Trade-off: ~2× the cost of a shared NAT, against an
+  AZ-level SPOF for egress. Collapse to one for a pure cost demo.
+- **VPC endpoints (PrivateLink + S3 gateway)** for ECR, STS, EC2, EKS, KMS, ELB,
+  autoscaling, logs and the SSM trio. They overlap with NAT and add cost; they are
+  kept because they keep AWS-API traffic off the NAT and are the migration path
+  toward removing it. Dropping NAT later requires completing the endpoint list.
+- **The ingress load balancer belongs to Terraform**, not to a controller.
+  `workload/modules/platform-ingress` declares an internal ALB, target group,
+  listener and security group; the cluster attaches through a `TargetGroupBinding`
+  that registers pod IPs and owns nothing.
   - **Why:** a load balancer created from inside the cluster never enters Terraform
-    state, so `terraform destroy` has no edge from it to the subnets it occupies.
-    Its ENIs then hold the subnets and the subnets hold the VPC. Owning the
-    resource makes teardown ordering a property of the dependency graph instead of
-    a script that has to out-guess how two operators sequence their own deletions.
-    §11 records how that was learned.
-  - **The internet-facing guard moved with it.** It used to be the *absence* of a
-    subnet tag — defeatable by anyone who could tag a subnet or annotate a Service.
-    It is now the absence of `internal = false` in reviewed HCL: exposing the
-    platform takes an edit and a pull request.
-  - **Trade-off:** a new edge is a Terraform change rather than a manifest. For one
-    shared gateway that is the property this repository wants everywhere else; it
-    would be the wrong trade for a platform handing each team its own edge.
-  - **Coupling to name:** the workload layer must know the namespace and name of
-    the Service istiod generates for the platform `Gateway`, which is defined in
-    the GitOps repository — the one contract pointing from Terraform outward. It is
-    an explicit variable with no default. A mismatch is silent: the target group
-    registers nothing and the load balancer answers 503, so check target health
-    before reading logs.
-- **VPC endpoints (PrivateLink + S3 gateway).** ECR, STS, EC2, EKS, KMS, ELB,
-  autoscaling, logs and the SSM trio resolve to private IPs.
-  - **Trade-off / redundancy:** NAT already provides full egress, so the
-    interface endpoints overlap with it and add per-hour + per-GB PrivateLink
-    cost. They are kept because (a) they keep AWS-API traffic on the AWS backbone
-    and off the NAT, and (b) they are the migration path toward removing NAT
-    entirely. If you drop NAT later, the endpoint list must be completed (e.g.
-    nothing here covers arbitrary public registries).
+    state, so `destroy` has no edge from it to the subnets it occupies. Its ENIs
+    hold the subnets, the subnets hold the VPC, and the teardown fails after most of
+    the platform is gone. Owning the resource makes teardown ordering a property of
+    the dependency graph (§11).
+  - **The internet-facing guard moved with it.** It was the *absence* of a
+    `kubernetes.io/role/elb` tag on the public subnets — defeatable by anyone who
+    could tag a subnet. It is now the absence of `internal = false` in reviewed HCL.
+  - **Cost:** a new edge is a Terraform change, not a manifest. Right for one shared
+    gateway; wrong for a platform giving each team its own.
+  - **Coupling:** `workload` must know the namespace and name of the Service istiod
+    generates for the platform `Gateway` — the one contract pointing from Terraform
+    outward. Declared as a variable with no default. A mismatch is silent: the target
+    group registers nothing and the ALB answers 503, so read target health first.
 
 ## 4. EKS control plane
 
-- **Private + public API endpoint.** Private access serves nodes and the bastion;
-  public access (`endpoint_public_access`, default `true`, gated by
-  `public_access_cidrs`) lets Terraform run from GitHub-hosted runners.
-  - **Trade-off:** a fully private endpoint is more secure but unreachable from
-    public CI runners — you'd need self-hosted runners in the VPC or a
-    bastion/VPN apply path. Exposing the endpoint with a CIDR allowlist trades a
-    little surface area for a dramatically simpler pipeline. Tighten
-    `public_access_cidrs` in `prod`.
-- **Secrets envelope encryption with KMS.** Customer-managed key with rotation;
-  the cluster role gets a scoped `kms:*` policy on that key only.
-- **Control-plane logging** enabled for all five log types (api, audit,
-  authenticator, controllerManager, scheduler), written to a **Terraform-managed
-  log group with a 90-day retention**.
-  - **Trade-off:** full audit logging has a CloudWatch cost; it's on because
-    observability/forensics is a Senior+ expectation.
-  - **Why the log group is declared here.** EKS writes to
-    `/aws/eks/<cluster>/cluster` and, if that group does not exist, creates it
-    itself with **no expiry** — and Terraform cannot set retention on a group it
-    does not own. So the group is created first, with the exact name, and the
-    cluster depends on it explicitly (the cluster resource does not reference it,
-    so there is no ordering for Terraform to infer). The choice is 90 days: a
-    forensic window that still bounds cost. The real alternative was never "some
-    other number", it was an accidental infinity.
-  - **Hazard:** if a cluster previously existed in the account, the log group
-    outlived it and the apply fails with `ResourceAlreadyExistsException`. Remedy
-    is `terraform import` — deleting the group would discard audit history.
-- **Authentication mode `API_AND_CONFIG_MAP`** so we can use modern **Access
-  Entries** while remaining compatible with anything still reading the aws-auth
-  ConfigMap.
-- **Core add-ons managed as code (`vpc-cni`, `coredns`, `kube-proxy`).** Declared
-  via `aws_eks_addon` (module `eks-addons`) with the version resolved for the
-  cluster's Kubernetes version and `resolve_conflicts = OVERWRITE`.
-  - **Why this matters (not cosmetic):** left self-managed, these add-ons stay at
-    whatever version EKS shipped at cluster creation and are **invisible to the
-    IaC**. During a control-plane upgrade they silently fall out of supported
-    version skew — e.g. a `1.34`-era `kube-proxy`/`coredns` running under a `1.35`
-    API server, surfacing as intermittent DNS/routing failures whose root cause is
-    hard to trace. Managing them makes the version a reviewed part of the upgrade
-    (the `1.34 → 1.35` bump in this repo updates them in the same change).
-  - **`metrics-server` and `aws-ebs-csi-driver` are managed here too.** Both close
-    gaps that fail silently rather than loudly: without metrics-server there is no
-    HPA and no `kubectl top`; without the EBS CSI driver every
-    PersistentVolumeClaim stays **Pending** forever, so nothing stateful can run —
-    and neither absence announces itself.
-    - The CSI driver is the only add-on that calls the AWS API (it creates,
-      attaches and deletes volumes), so it alone gets an IAM role, via IRSA scoped
-      to `kube-system:ebs-csi-controller-sa` and carrying the AWS-managed
-      `AmazonEBSCSIDriverPolicy`. A hand-written policy would drift from the
-      driver on every upgrade.
-    - IRSA rather than Pod Identity here, to match the pattern the ALB Controller
-      already uses. Pod Identity is the direction for new roles — it keeps the role
-      ARN off the Kubernetes object entirely, which matters once manifests move to
-      GitOps — and migrating this one later is contained.
-  - **Still deferred:** dedicated VPC-CNI IRSA role, native network policy
-    (`ENABLE_NETWORK_POLICY`) and prefix delegation (see §12).
+- **Private + public API endpoint**, gated by `public_access_cidrs`. Trade-off: a
+  fully private endpoint needs self-hosted runners in the VPC. The allowlist buys a
+  dramatically simpler pipeline; tighten it in prod.
+- **Secrets envelope encryption** with a rotated customer-managed KMS key, scoped to
+  the cluster role.
+- **All five control-plane log types**, to a Terraform-managed log group with 90-day
+  retention. Declared explicitly because EKS creates the group itself, with **no
+  expiry**, and Terraform cannot set retention on a group it does not own. The real
+  alternative was not another number — it was an accidental infinity.
+  - **Hazard:** a log group outliving a previous cluster fails the apply with
+    `ResourceAlreadyExistsException`. Remedy is `terraform import`; deleting it would
+    discard audit history.
+- **`API_AND_CONFIG_MAP` auth**, so Access Entries work while anything still reading
+  aws-auth keeps working.
+- **Core add-ons as code** (`vpc-cni`, `coredns`, `kube-proxy`, `metrics-server`,
+  `aws-ebs-csi-driver`, `eks-pod-identity-agent`) with versions pinned per
+  environment. Left self-managed they stay at whatever EKS shipped and fall out of
+  supported version skew during an upgrade — surfacing as intermittent DNS or
+  routing failures that are hard to trace. **Bump the cluster version and the add-on
+  pins in the same change.**
+  - `metrics-server` and the EBS CSI driver close gaps that fail *silently*: no HPA
+    and no `kubectl top` without the first; every PVC `Pending` forever without the
+    second.
+  - The CSI driver is the only add-on calling the AWS API, so it alone gets a role —
+    IRSA scoped to its ServiceAccount, carrying the AWS-managed policy rather than a
+    hand-written one that would drift on every upgrade.
 
-## 5. Compute — managed node group
+## 5. Compute — system pool + Karpenter
 
-- **EKS-managed node group on AL2023.** AL2 is end-of-life; AL2023 is the current
-  default and gets the security baseline for free.
-- Sizing via variables (`desired/min/max`, `instance_types`), default
-  `t3.medium`, 1–4 nodes.
-  - **Trade-off:** managed node groups are simpler and AWS-maintained but less
-    flexible than self-managed ASGs or Karpenter.
-  - **The node group is the system pool, and stays.** Karpenter runs in pods and
-    cannot host itself, so something must exist before it does. AWS states it
-    directly — *"Do not run Karpenter on a node that is managed by Karpenter"* — and
-    recommends at minimum one small node group with one worker. Its current sizing
-    (`desired_size = 2`) was chosen for Argo CD's pod count against the VPC CNI's
-    ENI-derived ceiling, not measured against what the pool now needs; whether it
-    can shrink is an open question, not a settled answer. Its AWS-side
-    prerequisites live in `modules/karpenter`; the controller, NodePools and
-    EC2NodeClasses are delivered by Argo CD from the platform GitOps repository —
-    Terraform provides only what Kubernetes cannot create for itself:
-    - **An Access Entry of type `EC2_LINUX`** for the node role. A role gets an
-      instance into the *account*; joining the *cluster* needs this entry, and it
-      is a different type from the `STANDARD` entries used for human and CI
-      principals. EKS creates it automatically for managed node groups, which is
-      why nothing needed it before. Without it, Karpenter's instances boot, look
-      healthy in EC2, and never become Kubernetes nodes.
-    - **`karpenter.sh/discovery` tags** on the private subnets and the cluster
-      security group. Karpenter finds where to launch by tag, not by
-      configuration; an unmatched selector provisions nothing and says only that
-      nothing matched.
-    - **An SQS interruption queue fed by EventBridge.** Karpenter works without
-      it, which is the trap — the gap only appears during a Spot reclaim, when the
-      node vanishes and its pods are killed rather than drained.
-    - **Pod Identity, not IRSA**, for the controller. The chart comes from Git, and
-      IRSA would require the role ARN in a values file, hardcoded per account. Pod
-      Identity binds role to ServiceAccount from the AWS side, so nothing crosses
-      the boundary. It needs the `eks-pod-identity-agent` add-on: without it the
-      association exists and silently delivers no credentials.
-    - The controller's `iam:PassRole` names one role, and `TerminateInstances` is
-      conditioned on **two** tags Karpenter writes to its own instances:
-      `kubernetes.io/cluster/<name>=owned` and `karpenter.sh/nodepool=*`. Neither is
-      sufficient alone — EKS puts the first on managed node group instances too, so
-      it is the second that keeps the system pool and the bastion out of reach.
-      - **This was conditioned on `karpenter.sh/discovery` first, and authorised
-        nothing.** That tag is on the *subnets and security groups Karpenter
-        selects*; it never reaches an instance, and it cannot be put there —
-        Karpenter reserves the `karpenter.sh/` prefix and drops such keys from an
-        `EC2NodeClass`'s `tags` silently, with no error, warning or event. Two
-        things had been written against a tag that could not exist: this condition,
-        and the teardown's instance sweep, which polled for it and therefore always
-        reported success. A neighbouring custom tag (`ManagedBy`) was applied
-        normally, which is what made it hard to see.
-  - **Instance `Name` tags come from a launch template.** Nothing else applies them
-    at launch: `tags` on `aws_eks_node_group` land on the node group, and an
-    `aws_autoscaling_group_tag` can only be created *after* the node group exists —
-    by which time EKS has already launched the nodes, so `propagate_at_launch` only
-    helps a future launch that, in an environment rebuilt from scratch, never comes.
-    That was tried first and observed to leave instances unnamed. The launch
-    template omits `image_id`, so EKS keeps supplying the EKS-optimized AMI and the
-    bootstrap user data; it carries tags and takes over nothing.
-    - **Sharp edge:** a change to the template creates a new version and the node
-      group rolls its nodes to adopt it. Correct behaviour, and a reason to keep the
-      template boring. Adding it to an existing node group also forces one
-      replacement.
+- **A managed node group on AL2023 is the system pool, and stays.** Karpenter runs in
+  pods and cannot host itself; AWS states it directly — *"do not run Karpenter on a
+  node that is managed by Karpenter"*. Its current size was chosen for Argo CD's pod
+  count against the VPC CNI's ENI-derived ceiling, never re-measured; whether it can
+  shrink is open (§12).
+- **Karpenter provisions everything else.** The controller, `NodePool` and
+  `EC2NodeClass` are delivered by Argo CD; Terraform provides only what Kubernetes
+  cannot create for itself:
+  - **An Access Entry of type `EC2_LINUX`** for the node role. A role gets an instance
+    into the *account*; joining the *cluster* needs this, and it is a different type
+    from the `STANDARD` entries used for humans and CI. Without it the instances boot,
+    look healthy in EC2, and never become nodes — with no error to follow.
+  - **`karpenter.sh/discovery` tags** on the private subnets and cluster security
+    group. Karpenter finds where to launch by tag; an unmatched selector provisions
+    nothing and reports only that nothing matched.
+  - **An SQS interruption queue** fed by EventBridge. Karpenter works without it,
+    which is the trap: the gap only appears during a Spot reclaim, when the node
+    vanishes instead of draining.
+  - **Pod Identity, not IRSA**, for the controller. The chart comes from a public Git
+    repository, and IRSA would require the role ARN in a values file, hardcoded per
+    account. Pod Identity binds role to ServiceAccount from the AWS side. It needs the
+    `eks-pod-identity-agent` add-on; without it the association exists and silently
+    delivers no credentials.
+  - **The controller's blast radius is bounded in IAM, not in configuration.**
+    `iam:PassRole` names one role and is conditioned on `iam:PassedToService`;
+    `TerminateInstances` requires **both** `kubernetes.io/cluster/<name>=owned` and
+    `karpenter.sh/nodepool` — the first alone would reach the managed node group,
+    which carries the same tag.
+    - **`karpenter.sh/` is a reserved tag prefix.** Keys under it are dropped from an
+      `EC2NodeClass`'s `tags` silently — no error, warning or event, while a custom
+      tag beside them applies normally. A condition naming `karpenter.sh/discovery`
+      on an *instance* can never match. Guarded by
+      `foundation/modules/karpenter/tests`.
+- **Instance `Name` tags come from a launch template.** `tags` on the node group land
+  on the group, and an `aws_autoscaling_group_tag` can only exist after EKS has
+  already launched the nodes. The template omits `image_id`, so EKS keeps supplying
+  the AMI and bootstrap data. Sharp edge: changing it rolls the nodes.
 
 ## 6. Access — bastion + SSM
 
-- **Bastion in a private subnet, no public IP, no inbound SSH.** Access is only
-  through **SSM Session Manager**; IMDSv2 is required and the root volume is
-  encrypted.
-- **Least-privilege egress (no `0.0.0.0/0`).** The SG allows only: HTTPS to the
-  VPC CIDR (the `ssm`/`ssmmessages`/`ec2messages` interface endpoints and the
-  private EKS API resolve to in-VPC IPs), DNS to the VPC resolver, and HTTPS to
-  the **S3 managed prefix list** (the S3 gateway endpoint). SSM works entirely
-  over PrivateLink — the bastion never needs internet.
-- **Tooling without internet.** `kubectl` is installed from a project-owned bucket
-  **in the VPC's own region**, reached through the S3 gateway endpoint.
-  - **Why not AWS's public bucket.** `amazon-eks` lives in **us-west-2**. A gateway
-    endpoint only routes to S3 in its own region, and the bastion's security group
-    permits egress only to the in-region S3 prefix list — so a cross-region request
-    matched no egress rule and was **dropped silently**. Not `AccessDenied`, not a
-    refused connection: a hang. The original design promised both "no internet
-    egress" and a bucket in another region, and those cannot both hold. Copying the
-    binary into an in-region bucket makes the endpoint the right path again and
-    keeps the bastion at zero internet.
-  - **Who puts the binary there.** The pipeline, after applying `foundation` — the
-    runner has internet, the bastion deliberately does not. Terraform owns the
-    bucket but not the binary: `aws_s3_object` would need the ~50 MB file on disk
-    at plan time, turning every local plan into a build step.
-  - **The host converges on its own.** The bastion is created *during* the
-    foundation apply; the bucket is seeded by the pipeline *after* it. That order
-    cannot be inverted without splitting the apply, so instead of failing once and
-    leaving the operator to fix it, a systemd unit retries until the object appears
-    and then stops.
-  - **A session needs no setup**, and getting there took two mechanisms because
-    one was not enough:
-    - The unit writes a world-readable `/etc/kubeconfig` — it holds no secret,
-      since auth is an exec call to `aws eks get-token` under the instance role —
-      and `/etc/profile.d/kube.sh` points `KUBECONFIG` at it and wires up
-      completion. Writing it to a user's home was not an option: `ssm-user` and
-      its home are created on **first session**, ~16 minutes after boot in one
-      observed case, so nothing at boot time can put a file there.
-    - `/etc/profile.d` is only read by **login** shells, and a Session Manager
-      session starts a plain `sh`. The file was written correctly and never read.
-      An `SSM-SessionManagerRunShell` document with `shellProfile = "bash -l"`
-      fixes the cause rather than the symptom: the standard mechanism works again,
-      for this and for anything added to `profile.d` later. That document is
-      **account-wide**, so a flag exists for accounts holding more than one
-      environment.
-    - `k` is a **script on PATH**, not a shell alias. An alias exists only in an
-      interactive shell that sourced it; a script works everywhere, including
-      non-interactive shells and `ssm send-command`, and it carries its own
-      `KUBECONFIG` default so it survives a session that never sourced the
-      profile.
-  - **Failures are loud.** An earlier version wrapped the download in a bare `if`
-    that discarded the error, so a broken install looked exactly like a working
-    one — which is why it went unnoticed for so long.
-  - `user_data_replace_on_change` forces a new instance whenever the boot script
-    changes: it runs once, so without this the code and the running host drift
-    apart in silence.
-  - The tooling bucket uses SSE-S3, not a CMK, with the exception scoped inline
-    rather than in `.trivyignore` — its contents are public binaries, and a
-    repo-wide suppression would also silence the rule for the state bucket, where
-    the key matters.
+- **Private subnet, no public IP, no inbound SSH.** Access only through SSM Session
+  Manager; IMDSv2 required, root volume encrypted.
+- **Least-privilege egress, no `0.0.0.0/0`:** HTTPS to the VPC CIDR (the SSM endpoints
+  and private EKS API resolve in-VPC), DNS to the VPC resolver, and HTTPS to the
+  **in-region S3 prefix list**. The bastion never needs internet.
+- **Tooling from an in-region bucket.** AWS's public `amazon-eks` bucket is in
+  us-west-2; a gateway endpoint only routes to S3 in its own region, so a
+  cross-region request matched no egress rule and **hung silently** — not
+  `AccessDenied`, not a refused connection. "No internet egress" and "a bucket in
+  another region" cannot both hold.
+  - The pipeline seeds the bucket after applying `foundation`; the runner has
+    internet, the bastion deliberately does not. Terraform owns the bucket, not the
+    binary — `aws_s3_object` would need a 50 MB file on disk at plan time.
+  - The bastion is created *during* the apply and the bucket seeded *after*, so a
+    systemd unit retries until the object appears. The host converges on its own.
+- **A session needs no setup**, which took two mechanisms:
+  - A world-readable `/etc/kubeconfig` (it holds no secret; auth is an exec call to
+    `aws eks get-token` under the instance role) plus `/etc/profile.d/kube.sh`. A
+    user's home was not an option — `ssm-user` is created on *first session*.
+  - `/etc/profile.d` is read only by **login** shells, and Session Manager starts a
+    plain `sh`. An `SSM-SessionManagerRunShell` document with `shellProfile =
+    "bash -l"` fixes the cause rather than the symptom. That document is
+    **account-wide**; a flag exists for accounts holding several environments.
+  - `k` is a script on PATH, not an alias, so it works in non-interactive shells and
+    `ssm send-command`.
+- **Cluster access is an Access Entry, not an IAM permission.** `hml` grants
+  cluster-admin to the CI deploy role, an IAM user, and the account root — the last
+  because that is the console identity. Root cannot be scoped or attributed to a
+  person; acceptable in an environment destroyed between sessions, not in prod (§12).
 
-  Helm is intentionally absent — Helm releases are managed by the `workload`
-  layer's provider (see §7), not imperatively on a host.
-- **Dual authorization model, deliberately separated:**
-  - `eks:DescribeCluster` (IAM) so `aws eks update-kubeconfig` works — this is an
-    AWS-API permission.
-  - An **EKS Access Entry** + `AmazonEKSClusterAdminPolicy` for in-cluster RBAC.
-  - These are two different planes; granting one without the other is a common
-    mistake (RBAC without `DescribeCluster` silently breaks kubeconfig setup).
-  - **The same split explains the console.** An account administrator sees the
-    cluster in the EKS console but gets `Unauthorized` on the **Resources** tab,
-    because listing Kubernetes objects goes through RBAC, not IAM. Provider v6 does
-    not bootstrap the creator either (`bootstrap_cluster_creator_admin_permissions`
-    defaults to false), so *nobody* has in-cluster access unless an Access Entry
-    says so. In `hml` the operator's console identity is listed in
-    `cluster_admin_role_arns` to make that tab usable. It grants no capability the
-    principal lacked — it already holds `AdministratorAccess` and could add the
-    entry by hand — but it records the grant in code instead of a click that
-    disappears on the next rebuild.
-  - **The account root is also listed in hml**, because that is the identity
-    actually signed into the console: `terra-admin` holds access keys but has no
-    console login. EKS **does** accept `arn:aws:iam::<account>:root` as an
-    access-entry principal — verified against the API rather than assumed, after an
-    earlier reading of the docs suggested otherwise. The input validation was
-    widened to match reality.
-  - **Not for prod — neither of them.** A human IAM user with standing
-    cluster-admin is an audit finding waiting to happen, and root is worse: it
-    cannot be scoped, cannot be restricted by IAM policy, and cannot be attributed
-    to a person, so every action it takes is logged as "the account". In hml that
-    trade is acceptable — the environment is destroyed between sessions and holds
-    nothing real. Production should grant a **role assumed for a session** and give
-    the operator a console login of their own with MFA. See §12.
-- **Trade-off:** the bastion is an extra always-on `t3.micro` and an operational
-  hop. The benefit is zero inbound exposure, no internet egress, and full Session
-  Manager audit logging vs. an SSH bastion with a public IP and key management.
+## 7. Add-ons — the workload layer
 
-## 7. Add-ons — AWS Load Balancer Controller (IRSA)
-
-- **What it does here, and what it no longer does.** It registers pod IPs into the
-  Terraform-owned target group through a `TargetGroupBinding`, and writes the
-  security-group rules that let the load balancer reach those pods
-  (`spec.networking`). It does **not** create load balancers any more: nothing in
-  the cluster asks it to (§3). Its IAM policy is unchanged and therefore wider than
-  the job now needs — narrowing it is a separate, reviewed change.
-- **IRSA, not node-role permissions.** A dedicated IAM role trusts the cluster
-  OIDC provider for exactly
-  `system:serviceaccount:kube-system:aws-load-balancer-controller`. The pod gets
-  only the controller's policy — least privilege, no shared node credentials.
-- Helm installs the chart against a **pre-created** service account (so the IRSA
-  annotation is guaranteed present before the controller starts), with `region`
-  and `vpcId` set explicitly rather than relying on IMDS auto-discovery.
-  - **Trade-off:** pinning chart `1.6.2` and provider versions favors
-    reproducibility over always-latest; bump deliberately.
-
-- **Argo CD (chart `10.4.0`, Argo CD `v3.5.1`)** — installed by the Helm provider,
-  last in the `workload` layer.
-  - **Why Terraform installs this one thing and then stops.** Terraform is a poor
-    tool for *custom resources*: `kubernetes_manifest` needs a CRD's schema at
-    **plan** time, and on a first apply the CRD does not exist yet. Helm hands
-    manifests to the cluster at apply time and never asks Terraform to understand
-    them. So Terraform installs Argo CD — which brings the three CRDs and their
-    controllers — and from there custom resources are delivered through Argo CD
-    rather than through Terraform. That is what unblocks Karpenter `NodePool`s and
-    Argo Rollouts later, without fighting the plan-time schema problem.
-  - **Installed bare, on purpose.** No root `Application`, no app-of-apps, no
-    repository wired up, no ingress, no exposed UI (`ClusterIP` + port-forward).
-    Each of those is a decision with its own consequences — repository credentials
-    need a source, an exposed UI needs TLS and an auth story.
-  - **The ALB Controller was not migrated.** It stays a Terraform-owned
-    `helm_release`. Two owners for one resource is the anti-pattern; moving it to
-    Argo CD is its own reviewed change, not a side effect of this one.
-  - **The `TargetGroupBinding` is applied by Terraform, not by Argo CD.** It needs
-    the target-group ARN and the load balancer's security-group id, both of which
-    name one AWS account, and the platform GitOps repository is public. Same
-    reasoning that put Karpenter's controller on Pod Identity rather than IRSA
-    (§5): account-specific identifiers stay on the Terraform side of the fence.
-    Like the Argo CD bootstrap, it ships as a local Helm chart, for the same
-    plan-time CRD reason described above.
-  - **Sizing is a hard constraint, not a preference.** The VPC CNI caps pods per
-    node by ENI capacity: a `t3.small` allows **11**. Six are already taken by the
-    cluster's own components and the ALB Controller, and Argo CD needs **7**
-    (verified by rendering the chart, not estimated). Hence `desired_size = 2` in
-    hml. HA mode stays off — `redis-ha` alone is three more pods.
-  - **Sharp edge on upgrades:** Helm 3 does not upgrade CRDs on `helm upgrade`. A
-    chart bump that changes a CRD needs it applied out of band. `crds.keep = true`
-    so uninstalling the release never cascade-deletes live `Application` objects.
+- **AWS Load Balancer Controller (IRSA + Helm).** Its job is now narrower: it
+  registers pod IPs into the Terraform-owned target group and writes the
+  security-group rules that reach them. It no longer creates load balancers, because
+  nothing asks it to (§3). Its IAM policy is unchanged and therefore wider than the
+  job — narrowing it is a separate change (§12).
+- **The `TargetGroupBinding` is applied by Terraform, not Argo CD.** It needs the
+  target-group ARN and a security-group id, both account-specific, and the GitOps
+  repository is public. Same reasoning as Pod Identity in §5.
+- **A default `gp3` StorageClass.** The CSI driver is a `foundation` add-on; without
+  a class it provisions nothing, and EKS's built-in `gp2` uses the in-tree
+  provisioner removed in 1.27. Reclaim policy is per environment: `Delete` in hml,
+  where a retained volume outlives `destroy` and bills silently.
+- **Argo CD, installed and then left alone.** Terraform installs it — bringing the
+  CRDs and controllers — and stops. From there custom resources arrive from Git,
+  which is what avoids the plan-time CRD-schema problem `kubernetes_manifest` has.
+- **The handover: two `AppProject`s and one root `Application`.** The projects are the
+  privilege boundary between the platform repository and the application repository;
+  they live in Terraform because a boundary stored in the repository it governs can
+  be widened by anyone who can commit there.
+  - Helm chart repositories count as sources. A multi-source Application takes its
+    chart from one and its values from another, and Argo CD checks both — listing
+    only the Git repository fails every chart-based component.
+  - **Sizing is a hard constraint.** The VPC CNI caps pods per node by ENI capacity.
+    Argo CD needs seven pods; HA mode adds three more for redis alone.
+  - **Sharp edge:** Helm 3 does not upgrade CRDs. `crds.keep = true` so uninstalling
+    never cascade-deletes live `Application` objects.
 
 ## 8. State & backend
 
-- **S3 backend with native locking** (`use_lockfile`, Terraform ≥ 1.10) — no
-  DynamoDB table to manage.
-- **State bucket encrypted with a customer-managed KMS key** (rotated, created in
-  `bootstrap`), not the AWS-managed SSE-S3 key. State can hold sensitive values,
-  so we want key-policy control and an audit trail on decryption.
-  - **Operational note:** every principal that runs Terraform (the CI deploy
-    roles and any human) needs `kms:Decrypt` / `kms:GenerateDataKey` on this key,
-    otherwise state reads/writes fail.
-- **Partial backend config**: `bucket/key/region` come from
-  `environments/<env>/backend.hcl`, so the same code serves `hml` and `prod`.
-- `.terraform.lock.hcl` is committed for reproducible provider resolution; the
-  non-sensitive per-environment `*.tfvars` are committed (others remain ignored).
+- **S3 with native locking** (`use_lockfile`, Terraform ≥ 1.10) — no DynamoDB table.
+- **Encrypted with a rotated customer-managed KMS key**, not SSE-S3, for key-policy
+  control and an audit trail on decryption. Every principal running Terraform needs
+  `kms:Decrypt` and `kms:GenerateDataKey` on it.
+- **Partial backend config**, so the same code serves both environments.
+- `.terraform.lock.hcl` is committed; the non-sensitive per-environment `*.tfvars`
+  are committed because CI depends on them.
+- **`bootstrap` keeps local state**, which is a durability risk worth naming: it
+  exists only on the operator's workstation. It is also why a broken trust policy is
+  always recoverable.
 
 ## 9. CI/CD (GitHub Actions)
 
-- **OIDC to AWS** — no long-lived access keys in GitHub. All actions are pinned
-  to a commit SHA and run on Node 24 runtimes.
-- **Two roles, split on the read/write boundary.** GitHub stamps a `sub` claim
-  describing how a run was triggered; the trust policies split on it:
+- **OIDC, no static keys.** All actions pinned to a commit SHA.
+- **Two roles, split on read/write.** GitHub stamps a `sub` claim describing how a run
+  was triggered, and the trust policies split on it:
 
-  | Claim | Role | Permission |
+  | Claim | Role | Used by |
   |---|---|---|
-  | `:pull_request`, `:ref:refs/heads/*` | `…-eks-plan` | read-only + `kms:Decrypt` on the state key |
-  | `:environment:<env>` | `…-eks-deploy` | write |
+  | `pull_request`, `ref:refs/heads/*` | plan (read-only) | `terraform-plan` |
+  | `environment:<env>` | deploy (write) | `terraform-deploy`, `terraform-destroy` |
 
-  - **Why it matters.** A pull request runs the workflow file *from its own
-    branch*. With one shared role — the previous design, trusting `repo:<repo>:*`
-    — the plan job carried a credential that could delete the account, reachable
-    without passing the deploy approval at all. The split removes the strong
-    credential from that path.
-  - **The Environment branch policy is part of the mechanism, not hygiene.** The
-    `environment:<name>` claim is minted for any job that declares an Environment,
-    and a pull request can add that line. Restricting each Environment to `master`
-    makes GitHub refuse such a job before it starts, so the claim is never issued.
-    This control lives in repository settings, so no `terraform test` or Trivy rule
-    can assert it — it is verified by an explicit negative test at cutover.
-  - **Authorization sits outside the pipeline.** An actor allowlist or token check
-    written as a workflow step runs *after* the credential exists, and is editable
-    by exactly the people it constrains. The gate must sit outside the thing it
-    guards.
-  - **The plan role holds no cluster access.** Reaching the Kubernetes API is
-    granted by an EKS Access Entry, separately from IAM. The plan role has none, so
-    the `workload` plan runs with `-refresh=false` and never contacts the cluster.
-    Trade-off: drift in the two in-cluster resources (`helm_release`,
-    `kubernetes_service_account`) does not surface in a PR plan; the deploy path's
-    own refresh catches it before anything is applied. Registering the plan role
-    read-only was rejected — Kubernetes' `view` role excludes Secrets, where Helm
-    keeps release metadata, and the next policy up permits mutation.
-  - **Known gap:** the deploy role still carries `AdministratorAccess`. Sizing a
-    custom policy for EKS is iterative, and was deferred rather than stall the part
-    that removes the exposure. See §12.
-  - **Known gap:** a `prod` reviewer approves *before* the job starts, so they
-    approve without seeing the plan. Splitting deploy into plan → approve → apply
-    would fix it; not done here.
-- `terraform-plan`: `fmt` + `validate` + `plan` on PRs (matrix over both layers),
-  posting the plan as a PR comment. The `workload` plan is skipped when
-  `foundation` has no outputs yet (greenfield/torn-down).
-- `terraform-test`: native `terraform test` on the critical modules. Mocked
-  providers + `command = plan` mean **no AWS credentials and no real infra** —
-  so it runs on PRs from any branch/fork. Guards security-critical invariants
-  (subnet LB tagging, private endpoint, auth mode, secrets encryption, admin
-  access entries).
-- `contract`: guards the **`foundation` → `workload` output contract**. The workload
-  layer reads seven foundation outputs through `terraform_remote_state`, a link that
-  exists only at run time — renaming or deleting one passes `fmt`, `validate`, every
-  module suite and Trivy, and fails during a `workload` apply. The check compares the
-  outputs referenced under `workload/` against those declared in
-  `foundation/outputs.tf`; no credentials, no providers, no state
-  (`scripts/check-layer-contract.sh`, also a pre-apply gate in `terraform-deploy`).
-  - **What it does not catch:** names only. An output that keeps its name and
-    changes meaning or type still passes. Guarding that would mean a typed interface
-    between the layers, not a name check — stated so the guard is not mistaken for
-    more than it is.
-- `security-scan`: **Trivy** IaC scan in `config` mode. Uploads SARIF to the
-  Security tab and fails the build on HIGH/CRITICAL; reviewed exceptions live in
-  `.trivyignore`.
-- `terraform-deploy`: manual `workflow_dispatch`. **Gated** — the `terraform test`
-  and Trivy jobs must pass before the apply job runs (and, for prod, before the
-  reviewer is even asked). Then applies a **saved plan** (`plan -out` then
-  `apply tfplan`) so apply never re-plans; `both` applies `foundation` before
-  `workload`.
-- `terraform-destroy`: manual `workflow_dispatch` with a typed confirmation;
-  destroys `workload` **before** `foundation` for `both` (reverse of apply).
-
-**Defense in depth.** The test + scan gates run twice on purpose: as a **PR gate**
-(reported on the merge) and again as a **pre-apply gate** inside `terraform-deploy`
-(blocking the apply). Both are environment-agnostic, so `hml` and `prod` get the
-identical checks. The PR checks can optionally be promoted to **required status
-checks** on `master` (branch protection) to hard-block merges on failure.
-
-- **Trade-off:** deploys are intentionally manual rather than auto-apply-on-merge
-  — safer for infra, at the cost of one human action per release.
+  A pull request runs the workflow file **from its own branch**, so without this split
+  anyone able to push a branch could run arbitrary AWS commands with the deploy role
+  before review. The `environment:` declaration is what mints the claim, and the
+  Environment's branch policy is what stops a branch minting it for itself.
+- **Deploys are never automatic on merge.** `workflow_dispatch`, gated on tests and
+  Trivy, applying a saved plan (`plan -out` → `apply tfplan`).
+- **The plan role holds no write permission at all**, including the state lock —
+  hence `-lock=false` on plan. It also skips refresh for `workload`, whose in-cluster
+  resources would require an Access Entry the plan role deliberately lacks. Drift in
+  those two resources shows up on the deploy path instead.
+- **Quality gates:** `fmt`, `validate`, the layer-contract check, module tests with
+  mocked providers (no credentials, no infrastructure), and a Trivy IaC scan.
+  Suppressions in `.trivyignore` require a written reason and a pointer to the section
+  that accepts the trade-off.
 
 ## 10. Environments
 
-`hml` and `prod` are isolated by distinct VPC CIDRs (`10.0/16` vs `10.1/16`),
-distinct state keys, and distinct AWS roles selected in CI. Production should
-additionally narrow `public_access_cidrs` from the default `0.0.0.0/0`.
+`hml` and `prod` are isolated by distinct VPC CIDRs, state keys and AWS roles. `hml`
+is destroyed between sessions, which shapes several defaults: `Delete` reclaim policy,
+a 24h node expiry, a permissive API CIDR. Each is stated where it differs from what
+production should do.
 
 ## 11. Teardown
 
-Destroying this platform is not the reverse of applying it, and the difference is
-not academic: four consecutive `terraform destroy` runs failed on 2026-08-24, and
-two attempts to script around the failure both aimed at the wrong object.
+**Destroying this platform is not the reverse of applying it.** Controllers inside the
+cluster create AWS resources Terraform never records, and Terraform then has no
+dependency edge from those resources to the subnets they occupy. The error names the
+subnet and never names what holds it — after most of the platform is already gone.
 
-**The shape of the problem.** Controllers inside the cluster create AWS resources
-that Terraform never records. Terraform then has no dependency edge from those
-resources to the subnets they occupy, so it tries to delete a subnet that is still
-held and AWS answers `DependencyViolation` — after most of the platform is already
-gone. The error names the subnet and never names what holds it.
-
-**The ingress load balancer was removed as a source**, by giving it to Terraform
-(§3). What remains cannot be: a resource that only becomes an orphan *during* the
-destroy cannot be checked before the destroy starts.
-
-`terraform-destroy.yml` is therefore ordered, not merely sequential:
-
-| Step | Why it is where it is |
-|---|---|
-| Drain cluster-owned state | Clears `syncPolicy.automated` on every Argo CD `Application` **before** deleting anything — `selfHeal` treats a deletion as an instruction to recreate. Then deletes the Karpenter `NodePool`s, **then** the Applications: deleting a NodePool is a request to Karpenter, and the Application that installs Karpenter is deleted moments later. Finally strips finalizers from any Application that survives. |
-| Terminate Karpenter instances | Its own step, and deliberately **not** gated on a live cluster. Everything above is a Kubernetes operation; this one identifies instances by AWS tags that outlive every Kubernetes object, and the case that matters most is the one where the cluster is already gone. On the normal path Karpenter has just drained its own nodes and this finds nothing — which is the signal that the ordering above is right. |
-| Destroy workload | Removes the platform ALB, which is why the preflight runs after it and not before. |
-| Preflight | Asserts the VPC holds nothing unowned, in seconds, rather than letting it surface as a `DependencyViolation` forty minutes in. |
-| Destroy foundation | Three passes, each opening a window between "Terraform removed X" and "Terraform needs what X's debris is holding": node group → sweep CNI interfaces → cluster → sweep the security groups EKS leaves → everything else. |
-
-The debris pattern, twice, at two levels:
+The ingress load balancer was removed as a source by giving it to Terraform (§3). What
+remains cannot be: **debris that does not exist until Terraform creates it**.
 
 ```
 Terraform destroys      AWS leaves behind        which holds
@@ -503,88 +268,58 @@ managed node group  →   VPC CNI interfaces   →   the subnets
 EKS cluster         →   eks-cluster-sg-<id>  →   the VPC
 ```
 
-Both are handled the same way and neither can be checked before the destroy starts,
-because in both cases the debris does not exist until Terraform creates it.
+`terraform-destroy.yml` is therefore ordered, not merely sequential:
 
-### Things that are true and cost a day to learn
+| Step | Why here |
+|---|---|
+| Drain cluster-owned state | Clears `syncPolicy.automated` first — `selfHeal` treats a deletion as an instruction to recreate. Then deletes Karpenter `NodePool`s **before** the Applications, because deleting a NodePool is a request to Karpenter and the Application installing Karpenter goes moments later. Then strips finalizers, which would otherwise hang the Helm uninstall. |
+| Terminate Karpenter instances | Its own step, **not** gated on a live cluster: it identifies instances by AWS tags that outlive every Kubernetes object, and the case that matters is the one where the cluster is already gone. On the normal path it finds nothing — which is the signal the ordering above is right. |
+| Destroy workload | Removes the platform ALB, which is why the preflight runs after it. |
+| Preflight | Asserts the VPC holds nothing unowned, in seconds, rather than as a `DependencyViolation` forty minutes in. |
+| Destroy foundation | Three passes, each opening a window between "Terraform removed X" and "Terraform needs what X's debris is holding": node group → sweep interfaces → cluster → sweep security groups → everything else. |
 
-- **The VPC CNI leaves interfaces behind.** It attaches secondary ENIs to each node
-  for pod IPs, and a terminated node can leave them `available`. An unattached ENI
-  holds a subnet exactly as an attached one does. This is invisible to any check
-  that runs before Terraform: while the node lives the interface is in use and
-  correctly reports as nothing. It orphans only once the node group is destroyed,
-  which is why that destroy is split out and the sweep runs in the window it opens.
-  Selected by the CNI's own tag `eks:eni:owner=amazon-vpc-cni`.
-- **`eks-cluster-sg-<cluster>-<id>` is owned by EKS, not by Terraform.** EKS creates
-  it with the cluster and deletes it with the cluster — *unless* something is still
-  in it, and an orphaned CNI interface is exactly that. Observed holding a VPC after
-  the cluster was gone. It is a symptom of the interface, not a cause: fix the ENI
-  and the group leaves with it. The preflight must **not** flag it while the cluster
-  is alive, which is a false positive that stopped a healthy teardown.
-- **`terraform output -raw` prints a warning and exits 0** when the state has no
-  outputs. The warning text becomes the value. Passed to the AWS CLI as an
-  identifier it produced a failed call, and a swallowed error made that
-  indistinguishable from an empty result — a sweep announced "none orphaned" while
-  an orphan sat in the VPC. Every identifier read this way is now checked for
-  shape, not for emptiness.
-- **A destroy that fails partway leaves partial outputs**, which breaks the pull
-  request plan for the `workload` layer — on pull requests that touch no Terraform
-  at all. The plan's greenfield guard asks whether the outputs that layer actually
-  reads are present, not whether the count is non-zero.
-- **Identify leftovers by ownership, never by name.** Three checks here originally
-  matched a name prefix (`k8s-`, `aws-K8S-`) or a count, and all three were wrong
-  in a state nobody had seen yet. Tags answer the question a prefix only guesses at.
-- **Read the state, not the outputs.** `terraform output` is a projection, and it
-  failed twice in different ways: once returning `Warning: No outputs found` *as the
-  value*, and once returning nothing at all because `-target` had rewritten the
-  outputs while the resource sat in state undeleted. The VPC id now comes from
-  `terraform show -json`, which reads the resource.
-- **Every guard here was written for the normal case and met in the recovery case.**
-  Six in a row: a `k8s-` prefix, a non-zero output count, a reserved tag, the
-  presence of a CRD, a live cluster, a cluster name in state. Each described what is
-  true during a healthy teardown and excluded exactly the situation the code existed
-  for. The rule that came out of it: **the teardown may depend only on what survives
-  a partial destroy** — AWS tags and the Terraform state — and must treat everything
-  Kubernetes-side as optional.
-- **Do not cancel a `deploy` or `destroy` once it has left the queue.** GitHub's API
-  reports `queued` for some time after a job is really running, so a run that looks
-  stuck may be mid-apply. Cancelling one left an EKS cluster, a VPC endpoint and a
-  route table in AWS but not in state, and reconciling that took longer than the
-  original run would have. `terraform import` is the way back for anything that has
-  an importable identity.
+### Rules this cost a week to learn
 
-### What is not covered yet
+- **Identify leftovers by ownership, never by name.** Prefix matches (`k8s-`,
+  `aws-K8S-`) and non-zero counts were all wrong in a state nobody had seen. Tags
+  answer what a prefix only guesses at.
+- **Read the state, not the outputs.** `terraform output` is a projection and failed
+  twice: once returning `Warning: No outputs found` *as the value*, once returning
+  nothing because `-target` had rewritten the outputs while the resource sat in state
+  undeleted. Identifiers now come from `terraform show -json`, and every one is
+  checked for shape rather than for emptiness.
+- **The teardown may depend only on what survives a partial destroy** — AWS tags and
+  Terraform state — and must treat everything Kubernetes-side as optional. Six guards
+  in a row were written for the healthy case and met in the recovery case: a name
+  prefix, an output count, a reserved tag, the presence of a CRD, a live cluster, a
+  cluster name in state.
+- **Release lags termination.** A sweep that breaks on its first empty result will
+  report success seconds after terminating something. Require two consecutive empty
+  passes.
+- **Do not cancel a deploy or destroy once it has left the queue.** GitHub reports
+  `queued` for some time after a job is really running, so a run that looks stuck may
+  be mid-apply. Cancelling one left an EKS cluster, a VPC endpoint and a route table
+  in AWS but not in state; `terraform import` is the way back.
+- **A local `terraform destroy` runs none of this.** The drain, the preflight and the
+  sweeps live in the workflow.
 
-- ~~**Karpenter (Phase 2).**~~ Covered. NodePools are drained while the controller
-  is still running, and a separate step terminates by tag whatever survives —
-  including in a recovery run where there is no controller left to ask. Verified
-  with two Karpenter nodes live at the start of a destroy (run 33995714269): the
-  drain removed them and the terminate step found nothing to do.
-- **The ENI sweep's delete branch is unexercised.** Two consecutive clean cycles
-  both reported `none orphaned`, because no interface was stranded either time. The
-  orphan is timing-dependent. The code is correct by inspection and its failures are
-  now loud, but the path that deletes has not run in anger.
-- **A local `terraform destroy` runs none of this.** The drain, the preflight and
-  the sweep live in the workflow. Destroying from a workstation skips all three.
+## 12. Known trade-offs to revisit for production
 
-## 12. Known trade-offs to revisit for true production
-
-| Area | Current (portfolio) | Production-hardening step |
-|------|---------------------|---------------------------|
-| API endpoint | Public + CIDR allowlist | Private-only + in-VPC runners / VPN |
-| `public_access_cidrs` | `0.0.0.0/0` default | Office/CI egress ranges only |
-| Egress | NAT + overlapping endpoints | Drop NAT, complete endpoint set |
-| Scaling | Karpenter + a fixed system node group | Shrink the system pool to what it actually needs (its size was chosen for Argo CD, never re-measured); split the single NodePool by workload class with weights |
-| Node instance types | An explicit two-type list, because the account is on the **AWS Free Plan** and EC2 refuses anything not free-tier eligible | Categories and generations, which is what AWS recommends and what Spot needs to draw from a wide pool |
-| Node AMIs | `al2023@latest` — patches arrive unattended, and two syncs months apart give different nodes with no diff in Git | Pin the alias and bump deliberately |
-| Consolidation | On (`WhenEmptyOrUnderutilized`) | Requires `requests=limits` for non-CPU resources on hosted workloads; belongs in the application repository's conventions |
-| Core add-ons | vpc-cni/coredns/kube-proxy managed + pinned | + dedicated VPC-CNI IRSA, network policy, prefix delegation |
-| Cluster add-ons | ALB controller (IRSA + Helm) | + External Secrets, ExternalDNS, policy agents |
-| Ingress edge | Internal ALB owned by Terraform, one shared gateway | Internet-facing scheme + ACM on the listener + WAF; a second edge per team would change the ownership trade (§3) |
-| ALB controller policy | Unchanged, wider than the `TargetGroupBinding`-only role it now plays | Size it to registration and security-group rules |
-| Teardown | Ordered workflow: drain → workload → preflight → node group → ENI sweep → foundation | Cover Karpenter's instances; exercise the sweep's delete path; make a local destroy run the same checks (§11) |
-| State bucket | Single shared bucket (KMS CMK) | Per-account/per-env buckets + bucket policies |
-| CI deploy role | Split from the plan role; `AdministratorAccess` | Custom policy sized to the managed services + permission boundary |
-| Human cluster access | hml lists an IAM **user** and the **account root** as cluster-admin so the console works | A role assumed for a session; operator console login with MFA; no root in daily use and no standing cluster-admin on a long-lived principal |
-| Prod approval | Reviewer approves before the job starts | Split deploy into plan → approve-with-plan → apply |
-```
+| Area | Current (portfolio) | Hardening step |
+|---|---|---|
+| API endpoint | Public + CIDR allowlist | Private-only + in-VPC runners or VPN |
+| `public_access_cidrs` | `0.0.0.0/0` | Office/CI egress ranges only |
+| Egress | NAT + overlapping endpoints | Drop NAT, complete the endpoint set |
+| System node group | Sized for Argo CD, never re-measured | Measure and shrink; it now hosts only controllers |
+| Node instance types | An explicit two-type list — the account is on the **AWS Free Plan** and EC2 refuses anything not free-tier eligible | Categories and generations, which is what Spot needs to draw from a wide pool |
+| Node AMIs | `al2023@latest`: patches arrive unattended, and two syncs months apart give different nodes with no diff in Git | Pin the alias, bump deliberately |
+| Consolidation | On | Requires `requests=limits` for non-CPU resources on hosted workloads |
+| Ingress edge | Internal ALB, one shared gateway | `internet-facing` + ACM on the listener + WAF |
+| ALB controller policy | Wider than the `TargetGroupBinding`-only role it now plays | Size it to registration and security-group rules |
+| VPC CNI | Defaults | Dedicated IRSA role, network policy, prefix delegation |
+| Cluster add-ons | ALB controller, storage, Argo CD | + External Secrets, ExternalDNS, policy agents |
+| State bucket | Single shared bucket | Per-account buckets + bucket policies |
+| CI deploy role | Split from plan; `AdministratorAccess` | Sized custom policy + permission boundary |
+| Human cluster access | hml lists an IAM user and the account **root** as cluster-admin | A role assumed per session, MFA, no standing cluster-admin |
+| Prod approval | Reviewer approves before the job starts | Split into plan → approve-with-plan → apply |
+| Teardown | Ordered, with sweeps | Exercise the sweeps' delete paths; make a local destroy run the same checks |
