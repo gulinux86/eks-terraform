@@ -38,6 +38,7 @@ jobs:
           - foundation/modules/cluster
           - foundation/modules/eks-addons
           - workload/modules/platform-ingress
+          - foundation/modules/karpenter
     steps:
       - name: Checkout
         uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
