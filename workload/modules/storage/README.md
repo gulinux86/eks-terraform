@@ -11,3 +11,32 @@ default, so a PVC with no explicit class stays `Pending` reporting
 
 It lives in `workload` because that is the only layer with the `kubernetes`
 provider — see ARCHITECTURE.md §2.
+## Requirements
+
+No requirements.
+
+## Providers
+
+| Name | Version |
+| ---- | ------- |
+| <a name="provider_kubernetes"></a> [kubernetes](#provider\_kubernetes) | n/a |
+
+## Modules
+
+No modules.
+
+## Resources
+
+| Name | Type |
+| ---- | ---- |
+| [kubernetes_storage_class_v1.gp3](https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs/resources/storage_class_v1) | resource |
+
+## Inputs
+
+| Name | Description | Type | Default | Required |
+| ---- | ----------- | ---- | ------- | :------: |
+| <a name="input_reclaim_policy"></a> [reclaim\_policy](#input\_reclaim\_policy) | What happens to the EBS volume when its PVC is deleted. Retain keeps it — data survives an accidental delete, but the volume is orphaned in Released state and Terraform will not clean it up, so it outlives `terraform destroy` and keeps costing. Delete removes it with the claim. Per environment on purpose: an ephemeral demo and a production cluster want opposite answers. | `string` | `"Retain"` | no |
+
+## Outputs
+
+No outputs.
