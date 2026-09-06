@@ -45,6 +45,12 @@ group registers nothing and the load balancer answers 503. See
 | <a name="requirement_helm"></a> [helm](#requirement\_helm) | 2.12.1 |
 | <a name="requirement_kubernetes"></a> [kubernetes](#requirement\_kubernetes) | 2.25.2 |
 
+## Providers
+
+| Name | Version |
+| ---- | ------- |
+| <a name="provider_terraform"></a> [terraform](#provider\_terraform) | n/a |
+
 ## Modules
 
 | Name | Source | Version |
