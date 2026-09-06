@@ -16,6 +16,10 @@ of AWS names an in-cluster object has to match, and none of them are secrets.
 | <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 5.40.0 |
 | <a name="requirement_tls"></a> [tls](#requirement\_tls) | >= 4.0.0 |
 
+## Providers
+
+No providers.
+
 ## Modules
 
 | Name | Source | Version |
