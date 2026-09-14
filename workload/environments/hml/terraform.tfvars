@@ -59,6 +59,13 @@ platform_source_repos = [
   # Git or HTTPS source, so omitting it fails the Application with "repo is not
   # permitted" — the failure PR #31 exists to fix, from a different registry.
   "oci://public.ecr.aws/karpenter/karpenter",
+
+  # Observability. Two more chart repositories, permitted for the same reason as the
+  # ones above: Argo CD checks an Application's chart source against this list, so a
+  # missing entry fails the sync with "repo is not permitted" rather than with
+  # anything that names the chart.
+  "https://prometheus-community.github.io/helm-charts",
+  "https://kiali.org/helm-charts",
 ]
 
 apps_source_repos = ["https://github.com/gulinux86/app-gitops"]
