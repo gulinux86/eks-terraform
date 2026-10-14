@@ -404,9 +404,16 @@ jobs:
           #
           # Release lags termination. The sweep polls for that reason; this does not,
           # so it must not judge the interfaces the sweep owns.
+          #
+          # `TagSet`, not `Tags`. describe-network-interfaces names the field TagSet
+          # while describe-security-groups names it Tags — an inconsistency in the
+          # AWS API, and one that fails open rather than closed: `Tags[?…]` on an
+          # interface matches nothing, `!(nothing)` is true, and every interface was
+          # therefore reported as blocking. Run 38631110366 stopped a healthy
+          # teardown on an interface carrying exactly the tag this exclusion names.
           ENIS=$(aws ec2 describe-network-interfaces \
                  --filters "Name=vpc-id,Values=$VPC" "Name=status,Values=available" \
-                 --query "NetworkInterfaces[?!(Tags[?Key=='eks:eni:owner' && Value=='amazon-vpc-cni'])].NetworkInterfaceId" \
+                 --query "NetworkInterfaces[?!(TagSet[?Key=='eks:eni:owner' && Value=='amazon-vpc-cni'])].NetworkInterfaceId" \
                  --output text) || FAIL=1
           if [ -n "$ENIS" ]; then
             echo "  BLOCKING unattached ENIs: $ENIS" >&2
