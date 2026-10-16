@@ -1,0 +1,110 @@
+# Native `terraform test` on every module that has a suite.
+#
+# The suites use mocked providers with `command = plan`, so this needs no AWS
+# credentials and creates nothing — it runs on pull requests from any branch or fork.
+#
+# The module list is DISCOVERED, not passed. That is the point of this template: the
+# list used to be hand-written in two workflows, with a note in the repository telling
+# contributors to update both, and forgetting one meant the deploy gate silently
+# skipped the new suite. A derived list cannot disagree with itself, because it is not
+# maintained anywhere.
+name: terraform-test
+
+on:
+  workflow_call:
+    inputs:
+      modules:
+        description: >-
+          JSON array to override discovery, e.g. '["a/b","c/d"]'. Leave empty to test
+          every directory containing a tests/ subdirectory.
+        type: string
+        required: false
+        default: ""
+      contract-script:
+        description: >-
+          Optional path to a script asserting a cross-layer contract. Runs
+          credential-free in its own job. Empty skips it.
+        type: string
+        required: false
+        default: ""
+      terraform-version:
+        type: string
+        required: false
+        default: "~> 1.10"
+
+permissions:
+  contents: read
+
+jobs:
+  # Discovery is its own job because a matrix must be known before the job using it
+  # starts — a matrix cannot be computed by the job it configures.
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.find.outputs.modules }}
+      count: ${{ steps.find.outputs.count }}
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - id: find
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n '${{ inputs.modules }}' ]; then
+            MODULES='${{ inputs.modules }}'
+            echo "using the supplied module list"
+          else
+            # A directory with tests/ is a module with a suite. Nothing else to keep
+            # in sync.
+            MODULES=$(find . -type d -name tests -not -path './.git/*' \
+                      | sed 's|/tests$||; s|^\./||' \
+                      | sort \
+                      | jq -R . | jq -sc .)
+          fi
+
+          N=$(printf '%s' "$MODULES" | jq 'length')
+          echo "modules=$MODULES" >> "$GITHUB_OUTPUT"
+          echo "count=$N"        >> "$GITHUB_OUTPUT"
+          echo "found $N module(s):"
+          printf '%s' "$MODULES" | jq -r '.[] | "  " + .'
+
+          # An empty matrix makes the test job vanish and the whole workflow report
+          # green — a gate that passes because it ran nothing is worse than no gate.
+          if [ "$N" = "0" ]; then
+            echo "no module has a tests/ directory; nothing would be verified" >&2
+            exit 1
+          fi
+
+  test:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJson(needs.discover.outputs.modules) }}
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive ${{ matrix.module }}
+
+      - name: Terraform init
+        run: terraform -chdir=${{ matrix.module }} init -input=false -backend=false
+
+      - name: Terraform test
+        run: terraform -chdir=${{ matrix.module }} test -no-color
+
+  # Separate job, and optional: a cross-layer contract is a property of a layered
+  # repository, not of Terraform. Where it applies, it catches what every other static
+  # check misses — a renamed output passes fmt, validate, every suite and Trivy, and
+  # fails at run time in the layer that reads it.
+  contract:
+    if: inputs.contract-script != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+      - run: ${{ inputs.contract-script }}

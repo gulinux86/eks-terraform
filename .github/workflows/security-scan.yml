@@ -1,9 +1,11 @@
+# Trivy as a pull-request gate. The steps live in _security-scan.yml, which the
+# deploy workflow also calls — so the gate and the check cannot drift apart.
+#
+# They had drifted: this scan uploads SARIF and enforces separately, while the
+# deploy's inline copy had neither. A gate weaker than the check it mirrors reports
+# success for a test that was not run.
 name: security-scan
 
-# IaC misconfiguration scanning with Trivy as a PR gate. Runs in `config` mode
-# over the Terraform code, fails on HIGH/CRITICAL findings, and uploads SARIF so
-# results appear under the repository's Security tab. Reviewed exceptions live in
-# the committed `.trivyignore`.
 on:
   pull_request:
     branches: [master, develop, main]
@@ -13,49 +15,17 @@ on:
       - "**.hcl"
       - ".trivyignore"
       - ".github/workflows/security-scan.yml"
+      - ".github/workflows/_security-scan.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  security-events: write # upload SARIF to code scanning
+  security-events: write
 
 concurrency:
   group: security-scan-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  trivy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
-
-      # First pass: generate SARIF for the Security tab. soft-fail so a finding
-      # never blocks the upload step that surfaces it.
-      - name: Trivy config scan (SARIF)
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
-        with:
-          scan-type: config
-          scan-ref: .
-          format: sarif
-          output: trivy-results.sarif
-          severity: HIGH,CRITICAL
-          trivyignores: .trivyignore
-          exit-code: "0"
-
-      - name: Upload SARIF to code scanning
-        if: always()
-        uses: github/codeql-action/upload-sarif@1a818fd5f97ed0ee9a823421bd5b171add01227f # v4.36.2
-        with:
-          sarif_file: trivy-results.sarif
-
-      # Second pass: enforce the gate. exit-code 1 fails the PR on HIGH/CRITICAL.
-      - name: Trivy config scan (gate)
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
-        with:
-          scan-type: config
-          scan-ref: .
-          format: table
-          severity: HIGH,CRITICAL
-          trivyignores: .trivyignore
-          exit-code: "1"
+  scan:
+    uses: ./.github/workflows/_security-scan.yml

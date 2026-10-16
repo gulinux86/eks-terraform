@@ -48,7 +48,7 @@ jobs:
       # Assumes the read-only PLAN role. This job runs on pull requests, whose
       # workflow file comes from the PR's own branch — it must never hold a
       # credential that can mutate AWS.
-      - name: Select environment + role
+      - name: Select environment
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             ENV="${{ github.event.inputs.environment }}"
@@ -56,22 +56,17 @@ jobs:
             ENV="hml"
           fi
           echo "ENV_NAME=$ENV" >> "$GITHUB_ENV"
-          if [ "$ENV" = "prod" ]; then
-            echo "AWS_ROLE_ARN=${{ secrets.PROD_PLAN_ROLE_ARN }}" >> "$GITHUB_ENV"
-          else
-            echo "AWS_ROLE_ARN=${{ secrets.HML_PLAN_ROLE_ARN }}" >> "$GITHUB_ENV"
-          fi
 
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0
+      # The PLAN role — read-only. This job deliberately declares no `environment:`,
+      # which is what makes GitHub withhold the `environment:<name>` claim the write
+      # role trusts: a pull request runs the workflow file from its own branch, so it
+      # must not be able to mint that claim for itself.
+      - name: Authenticate to AWS and install Terraform
+        uses: gulinux86/ci-templates/.github/actions/aws-terraform-setup@main
         with:
-          role-to-assume: ${{ env.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
-        with:
-          terraform_version: "~> 1.10"
+          environment: ${{ env.ENV_NAME }}
+          role: plan
+          plan-role-arn: ${{ env.ENV_NAME == 'prod' && secrets.PROD_PLAN_ROLE_ARN || secrets.HML_PLAN_ROLE_ARN }}
 
       - name: Terraform fmt
         run: terraform fmt -check -recursive
