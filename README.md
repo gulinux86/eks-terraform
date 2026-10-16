@@ -36,6 +36,10 @@ workload/    ALB controller · ingress ALB · storage      ←┘
 | `foundation` | VPC, EKS, KMS, system node group, bastion, endpoints, core add-ons, Karpenter's AWS prerequisites | `foundation/<env>/terraform.tfstate` |
 | `workload` | ALB controller, ingress ALB, StorageClass, Argo CD, the handover | `workload/<env>/terraform.tfstate` |
 
+Everything above the handover arrives from `platform-gitops`: Gateway API,
+cert-manager, Istio ambient, Karpenter, and the metrics stack (Prometheus, Grafana,
+Kiali).
+
 `workload` reads `foundation` outputs, so **`foundation` applies first**.
 `foundation/outputs.tf` is that contract — `scripts/check-layer-contract.sh` guards it
 in CI. Kubernetes version and add-on pins live in
@@ -86,8 +90,22 @@ Or through the bastion, which already has `kubectl`:
 aws ssm start-session --target "$(terraform -chdir=foundation output -raw bastion_instance_id)"
 ```
 
-Argo CD is not exposed — `kubectl -n argocd port-forward svc/argocd-server 8080:443`,
-password in the `argocd-initial-admin-secret`.
+Nothing in the platform is exposed; reach the UIs by port-forward:
+
+```bash
+kubectl -n argocd        port-forward svc/argocd-server 8080:443              # :8080  admin
+kubectl -n observability port-forward svc/kube-prometheus-stack-grafana 3000:80   # :3000  admin
+kubectl -n observability port-forward svc/kiali 20001:20001                   # :20001 no login
+```
+
+Argo CD's and Grafana's passwords are in `argocd-initial-admin-secret` and
+`kube-prometheus-stack-grafana` — both chart-generated, and regenerated on every
+deploy. Kiali is read-only and unauthenticated, because the only way to reach it is a
+port-forward from a machine that already has cluster credentials.
+
+**Kiali needs traffic before it shows anything.** Its graph is drawn from
+`istio_requests_total`, which only accumulates while requests flow — a quiet cluster
+renders an empty topology that looks like a mesh problem.
 
 ## CI/CD
 
