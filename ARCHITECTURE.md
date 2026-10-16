@@ -77,7 +77,11 @@ hands the cluster to Argo CD.
 
 - **A managed node group is the system pool and stays.** Karpenter runs in pods and
   cannot host itself. Its size was chosen for Argo CD's pod count against the VPC
-  CNI's ENI ceiling, never re-measured (§12).
+  CNI's ENI ceiling.
+  - **There is more headroom than that number assumed.** The whole metrics stack —
+    Prometheus, Grafana, the operator, kube-state-metrics, node-exporter, Kiali — fit
+    on the same two nodes with nothing Pending and no Karpenter node provisioned. The
+    pool can likely shrink; what it actually needs is still unmeasured (§12).
 - **Karpenter provisions the rest**, delivered by Argo CD. Terraform provides only
   what Kubernetes cannot create for itself:
 
@@ -135,6 +139,44 @@ hands the cluster to Argo CD.
     chart-based component.
   - **Sharp edge:** Helm 3 does not upgrade CRDs. `crds.keep = true` so uninstalling
     never cascade-deletes live `Application` objects.
+
+### Observability
+
+Delivered by Argo CD (waves 9 and 10), not as an AWS add-on.
+
+- **In-cluster Prometheus and Grafana, because of Kiali.** Kiali reads Istio telemetry
+  from Prometheus, and the mesh is the specific thing that was invisible — ambient has
+  no sidecar to inspect, so until this existed the mesh was evidenced only by requests
+  succeeding. Amazon Managed Prometheus could serve it through remote-read and SigV4,
+  which is more plumbing on the component the whole phase is for.
+- **No Alertmanager.** It has no destination — no Slack, no PagerDuty, no on-call
+  rotation. Installed unconfigured it would make alerting *look* present, and someone
+  reading the cluster would reasonably assume a failure reaches a human. The same
+  argument removes the etcd, scheduler, controller-manager and kube-proxy rules and
+  their scrape targets: EKS manages those and does not expose them, so they would be
+  permanently-down targets firing alerts nobody can act on.
+- **Retention in hours, and no volume.** The environment is destroyed between sessions
+  and the StorageClass reclaims on delete, so a 15-day retention is a promise it
+  cannot keep — and it is most of what makes Prometheus heavy. Metrics therefore do
+  not survive a teardown (§12).
+- **It fits the system node group.** Seven pods on the two nodes that already carry
+  Argo CD, Istio, cert-manager, the ALB controller and Karpenter — nothing Pending,
+  and Karpenter provisioned nothing. That is the first measurement against the open
+  question in §5.
+- **L7 metrics come from the gateway, not from ztunnel.** ztunnel is an L4 proxy: it
+  reports `istio_tcp_*` and cannot report per-request status codes, so
+  `istio_requests_total` — what Kiali draws its graph from — did not exist with only
+  istiod and ztunnel scraped. The gateway pod is where requests are parsed. Pod-to-pod
+  L7 detail would need a waypoint per namespace, which is the ambient trade and a
+  separate decision.
+- **Two traps worth knowing**, both found by opening the UIs rather than by review:
+  - Chart 90.0.0 defaults to `grafana:13.2.1-distroless`, which ships **without the
+    core datasource plugins**. The provisioned datasource then has the right URL, a
+    reachable Service, and no driver: every query returns nothing while the log says
+    `Could not find plugin definition for data source`. The image is pinned to 12.1.1.
+  - Prometheus pods carry `ambient.istio.io/bypass-inbound-capture`. Without it the
+    mesh intercepts scraping and every target's identity becomes the proxy's rather
+    than the workload's.
 
 ## 8. State & backend
 
@@ -223,12 +265,16 @@ EKS cluster         →   eks-cluster-sg     →   the VPC
 | API endpoint | Public + CIDR allowlist | Private-only + in-VPC runners |
 | `public_access_cidrs` | `0.0.0.0/0` | Office/CI ranges only |
 | Egress | NAT + overlapping endpoints | Drop NAT, complete the endpoint set |
-| System node group | Sized for Argo CD, never re-measured | Measure and shrink |
+| System node group | Sized for Argo CD; now also carries the whole metrics stack without Karpenter provisioning anything | Measure what it actually needs and shrink — the headroom is larger than assumed |
 | Node instance types | Two explicit types — the account is on the **AWS Free Plan** and EC2 refuses anything else | Categories and generations, which is what Spot needs |
 | Node AMIs | `al2023@latest` — unattended patches, non-reproducible | Pin and bump deliberately |
 | Consolidation | On | Requires `requests=limits` for non-CPU resources on workloads |
 | Ingress edge | Internal ALB, one gateway | `internet-facing` + ACM + WAF |
 | ALB controller policy | Wider than the job it now does | Size it to registration |
+| Observability | In-cluster Prometheus + Grafana + Kiali; retention in hours, no volume, so metrics do not survive a teardown | Amazon Managed Prometheus for retention, with Grafana — managed or in-cluster — reading from it. Worth doing when there is a series anyone would compare against yesterday |
+| Alerting | None. Alertmanager deliberately absent | A destination and an on-call story first; the component second |
+| Grafana image | Pinned to 12.1.1, because chart 90.0.0's `13.2.1-distroless` default ships without the core datasource plugins | Unpin when the chart moves to a 13.x image that is not distroless |
+| Mesh L7 metrics | Gateway only — ztunnel is L4 and reports no per-request data | A waypoint per namespace where pod-to-pod request detail is actually wanted |
 | VPC CNI | Defaults | Dedicated IRSA, network policy, prefix delegation |
 | State bucket | Single shared bucket | Per-account buckets + policies |
 | CI deploy role | `AdministratorAccess` | Sized policy + permission boundary |
