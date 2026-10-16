@@ -55,7 +55,7 @@ jobs:
       # Same action the deploy uses. These three steps were byte-identical in both
       # files; the code that decides which credential a job assumes now exists once.
       - name: Authenticate to AWS and install Terraform
-        uses: gulinux86/ci-templates/.github/actions/aws-terraform-setup@master
+        uses: gulinux86/ci-templates/.github/actions/aws-terraform-setup@9ba44da1477e24b8a37a68a568af0b56d7f7c077 # pre-v1
         with:
           environment: ${{ env.ENVIRONMENT }}
           role: deploy
