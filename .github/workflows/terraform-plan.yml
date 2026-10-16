@@ -62,7 +62,7 @@ jobs:
       # role trusts: a pull request runs the workflow file from its own branch, so it
       # must not be able to mint that claim for itself.
       - name: Authenticate to AWS and install Terraform
-        uses: gulinux86/ci-templates/.github/actions/aws-terraform-setup@main
+        uses: gulinux86/ci-templates/.github/actions/aws-terraform-setup@master
         with:
           environment: ${{ env.ENV_NAME }}
           role: plan

@@ -68,7 +68,7 @@ jobs:
       # matters more than the eight lines it saves: two copies can receive a fix
       # separately, and the failure grants the wrong role rather than erroring.
       - name: Authenticate to AWS and install Terraform
-        uses: gulinux86/ci-templates/.github/actions/aws-terraform-setup@main
+        uses: gulinux86/ci-templates/.github/actions/aws-terraform-setup@master
         with:
           environment: ${{ env.ENVIRONMENT }}
           role: deploy
