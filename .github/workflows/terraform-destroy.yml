@@ -52,24 +52,14 @@ jobs:
       # Assumes the write-capable DEPLOY role — same gate as terraform-deploy: the
       # `environment:` declaration above is what mints the subject claim this role
       # trusts, and the Environment's branch policy gates the job itself.
-      - name: Select AWS role
-        run: |
-          if [ "$ENVIRONMENT" = "prod" ]; then
-            echo "AWS_ROLE_ARN=${{ secrets.PROD_DEPLOY_ROLE_ARN }}" >> "$GITHUB_ENV"
-          else
-            echo "AWS_ROLE_ARN=${{ secrets.HML_DEPLOY_ROLE_ARN }}" >> "$GITHUB_ENV"
-          fi
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0
+      # Same action the deploy uses. These three steps were byte-identical in both
+      # files; the code that decides which credential a job assumes now exists once.
+      - name: Authenticate to AWS and install Terraform
+        uses: gulinux86/ci-templates/.github/actions/aws-terraform-setup@master
         with:
-          role-to-assume: ${{ env.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
-        with:
-          terraform_version: "~> 1.10"
+          environment: ${{ env.ENVIRONMENT }}
+          role: deploy
+          deploy-role-arn: ${{ env.ENVIRONMENT == 'prod' && secrets.PROD_DEPLOY_ROLE_ARN || secrets.HML_DEPLOY_ROLE_ARN }}
 
       - name: Resolve layers
         run: |
