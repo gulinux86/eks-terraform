@@ -1,0 +1,75 @@
+# IaC misconfiguration scanning with Trivy, as a pull-request gate.
+#
+# Two passes on purpose. The first generates SARIF with soft-fail, so a finding can
+# never block the upload that surfaces it in the Security tab; the second enforces the
+# gate. One pass cannot do both: failing on a finding would skip the upload, and not
+# failing would make the gate decorative.
+#
+# Needs no AWS credentials — it reads files.
+name: security-scan
+
+on:
+  workflow_call:
+    inputs:
+      scan-ref:
+        description: Path to scan.
+        type: string
+        required: false
+        default: "."
+      severity:
+        type: string
+        required: false
+        default: HIGH,CRITICAL
+      trivyignore:
+        description: >-
+          Path to the ignore file. Every entry there should carry a written reason and
+          a pointer to the decision that accepts the trade-off — a suppression without
+          one is indistinguishable from a bug.
+        type: string
+        required: false
+        default: .trivyignore
+      upload-sarif:
+        description: Set false where code scanning is unavailable (private repo without GHAS).
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+  security-events: write # upload SARIF to code scanning
+
+jobs:
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - name: Trivy config scan (SARIF)
+        if: inputs.upload-sarif
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: ${{ inputs.scan-ref }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: ${{ inputs.severity }}
+          trivyignores: ${{ inputs.trivyignore }}
+          exit-code: "0"
+
+      - name: Upload SARIF to code scanning
+        if: always() && inputs.upload-sarif
+        uses: github/codeql-action/upload-sarif@1a818fd5f97ed0ee9a823421bd5b171add01227f # v4.36.2
+        with:
+          sarif_file: trivy-results.sarif
+
+      # The gate. exit-code 1 fails the run on anything at or above `severity`.
+      - name: Trivy config scan (gate)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: ${{ inputs.scan-ref }}
+          format: table
+          severity: ${{ inputs.severity }}
+          trivyignores: ${{ inputs.trivyignore }}
+          exit-code: "1"
