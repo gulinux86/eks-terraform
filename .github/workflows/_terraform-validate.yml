@@ -1,0 +1,54 @@
+# Formatting and configuration validity, credential-free.
+#
+# This exists to run BEFORE anything assumes an AWS role. `validate` with
+# `-backend=false` needs no credentials, no state and no network: it checks that the
+# HCL parses, that types line up, and that every reference resolves. Code that fails
+# here would fail a plan too, having first assumed a role for nothing.
+#
+# It also closes a gap in the deploy path. The module suites only `fmt` the modules
+# that have tests, so the layer roots — foundation/*.tf, workload/*.tf — were never
+# checked before an apply. A malformed root would reach the apply step and fail there,
+# after the write role was assumed.
+name: _terraform-validate
+
+on:
+  workflow_call:
+    inputs:
+      layers:
+        description: JSON array of layer directories to validate, e.g. '["foundation","workload"]'.
+        type: string
+        required: true
+      terraform-version:
+        type: string
+        required: false
+        default: "~> 1.10"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        layer: ${{ fromJson(inputs.layers) }}
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      # Whole repository, not just this layer: formatting is not per-directory, and
+      # running it once per layer is cheap enough to not be worth narrowing.
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      # -backend=false is what keeps this credential-free. A real init would reach
+      # S3 for the state, and the point is to fail before any role is assumed.
+      - name: Terraform init (no backend)
+        run: terraform -chdir=${{ matrix.layer }} init -backend=false -input=false
+
+      - name: Terraform validate
+        run: terraform -chdir=${{ matrix.layer }} validate
