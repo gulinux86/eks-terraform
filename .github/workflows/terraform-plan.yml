@@ -31,7 +31,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Credential-free, and first. A plan assumes an AWS role; code that does not parse
+  # or does not type-check would fail the plan anyway, having assumed one for nothing.
+  # Cheapest checks before the credentialed one.
+  validate:
+    uses: ./.github/workflows/_terraform-validate.yml
+    with:
+      layers: '["foundation", "workload"]'
+
   plan:
+    needs: validate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -68,14 +77,11 @@ jobs:
           role: plan
           plan-role-arn: ${{ env.ENV_NAME == 'prod' && secrets.PROD_PLAN_ROLE_ARN || secrets.HML_PLAN_ROLE_ARN }}
 
-      - name: Terraform fmt
-        run: terraform fmt -check -recursive
-
+      # fmt and validate already ran in the `validate` job, credential-free. This
+      # init configures the real backend, which is what the plan needs and what the
+      # earlier check deliberately skipped.
       - name: Terraform init
         run: terraform -chdir=${{ matrix.layer }} init -backend-config=environments/${{ env.ENV_NAME }}/backend.hcl
-
-      - name: Terraform validate
-        run: terraform -chdir=${{ matrix.layer }} validate
 
       - name: Terraform plan
         id: plan
