@@ -51,7 +51,7 @@ Terraform `~> 1.10`. Each layer uses a partial backend from
 `environments/<env>/backend.hcl`.
 
 ```bash
-terraform -chdir=bootstrap init && terraform -chdir=bootstrap apply   # once per account
+terraform -chdir=bootstrap init && terraform -chdir=bootstrap apply -var environment=hml   # once per account
 
 terraform -chdir=foundation init  -backend-config=environments/hml/backend.hcl
 terraform -chdir=foundation apply -var-file=environments/hml/terraform.tfvars
@@ -63,8 +63,9 @@ terraform -chdir=workload   apply -var-file=environments/hml/terraform.tfvars
 Credential-free checks, the same ones CI runs:
 
 ```bash
-terraform -chdir=foundation fmt -recursive
+terraform fmt -check -recursive
 terraform -chdir=foundation init -backend=false && terraform -chdir=foundation validate
+terraform -chdir=workload   init -backend=false && terraform -chdir=workload   validate
 ./scripts/check-layer-contract.sh
 trivy config --severity HIGH,CRITICAL --ignorefile .trivyignore .
 
@@ -162,5 +163,4 @@ scripts/       check-layer-contract.sh
 ```
 
 Module `README.md`s are terraform-docs output under a handwritten title; regenerate
-rather than hand-editing. Adding a test suite means adding the module path to the
-matrix in **both** `terraform-test.yml` and the `test` job of `terraform-deploy.yml`.
+rather than hand-editing. Adding a test suite needs no workflow edit (see CI/CD).

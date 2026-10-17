@@ -11,7 +11,7 @@
 #
 # LIMIT, on purpose: this checks names only. An output that keeps its name and
 # changes meaning or type still passes. Guarding that needs typed interfaces, not a
-# name check — see ARCHITECTURE.md §9.
+# name check — see ARCHITECTURE.md §2.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

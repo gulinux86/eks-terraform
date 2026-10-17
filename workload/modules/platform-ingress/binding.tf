@@ -6,7 +6,8 @@
 # to the cluster at apply time and never asks Terraform to understand them.
 #
 # And it is Terraform that applies it, not Argo CD, because the values below name
-# resources in one AWS account and the platform repository is public (design §4).
+# resources in one AWS account and the platform repository is public
+# (ARCHITECTURE.md §7).
 resource "helm_release" "target_group_binding" {
   name      = "platform-ingress"
   chart     = "${path.module}/chart"

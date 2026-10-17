@@ -36,17 +36,17 @@ variable "kubernetes_version" {
 
 variable "vpc_cni_version" {
   type        = string
-  description = "Pin the vpc-cni add-on version. Null resolves the latest compatible with kubernetes_version."
+  description = "vpc-cni add-on version. Required: an unpinned add-on resolves to whatever is latest at apply time. Bump together with kubernetes_version."
 }
 
 variable "coredns_version" {
   type        = string
-  description = "Pin the coredns add-on version. Null resolves the latest compatible with kubernetes_version."
+  description = "coredns add-on version. Required: an unpinned add-on resolves to whatever is latest at apply time. Bump together with kubernetes_version."
 }
 
 variable "kube_proxy_version" {
   type        = string
-  description = "Pin the kube-proxy add-on version. Null resolves the latest compatible with kubernetes_version."
+  description = "kube-proxy add-on version. Required: an unpinned add-on resolves to whatever is latest at apply time. Bump together with kubernetes_version."
 }
 
 variable "instance_types" {

@@ -1,4 +1,4 @@
-# foundation — EKS platform layer (network, cluster, nodes, bastion, endpoints, core add-ons)
+# foundation — EKS platform layer (network, cluster, nodes, bastion, endpoints, core add-ons, Karpenter prerequisites)
 
 Applied first, and consumed by `workload` through `terraform_remote_state`.
 `outputs.tf` is that contract: renaming or removing an output there breaks the
@@ -42,12 +42,12 @@ No resources.
 | ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_cidr_block"></a> [cidr\_block](#input\_cidr\_block) | Networking CIDR block to be used for the VPC | `string` | n/a | yes |
 | <a name="input_cluster_admin_role_arns"></a> [cluster\_admin\_role\_arns](#input\_cluster\_admin\_role\_arns) | IAM principals granted EKS cluster-admin (typically the CI/CD deploy role that runs Terraform). Needed so the workload layer's kubernetes/helm providers are authorized. Required — see the validation below. | `list(string)` | n/a | yes |
-| <a name="input_coredns_version"></a> [coredns\_version](#input\_coredns\_version) | Pin the coredns add-on version. Null resolves the latest compatible with kubernetes\_version. | `string` | n/a | yes |
+| <a name="input_coredns_version"></a> [coredns\_version](#input\_coredns\_version) | coredns add-on version. Required: an unpinned add-on resolves to whatever is latest at apply time. Bump together with kubernetes\_version. | `string` | n/a | yes |
 | <a name="input_desired_size"></a> [desired\_size](#input\_desired\_size) | Desired number of nodes | `number` | n/a | yes |
 | <a name="input_ebs_csi_version"></a> [ebs\_csi\_version](#input\_ebs\_csi\_version) | aws-ebs-csi-driver add-on version. Required for the same reason. | `string` | n/a | yes |
 | <a name="input_endpoint_public_access"></a> [endpoint\_public\_access](#input\_endpoint\_public\_access) | Expose the EKS API server publicly so Terraform (GitHub-hosted runners) and operators can reach it. Private access remains enabled. | `bool` | n/a | yes |
 | <a name="input_instance_types"></a> [instance\_types](#input\_instance\_types) | EC2 instance types for the managed node group. On a new AWS account under the Free Plan, only free-tier-eligible types launch (e.g. t3.small, t3.micro, c7i-flex.large, m7i-flex.large). | `list(string)` | n/a | yes |
-| <a name="input_kube_proxy_version"></a> [kube\_proxy\_version](#input\_kube\_proxy\_version) | Pin the kube-proxy add-on version. Null resolves the latest compatible with kubernetes\_version. | `string` | n/a | yes |
+| <a name="input_kube_proxy_version"></a> [kube\_proxy\_version](#input\_kube\_proxy\_version) | kube-proxy add-on version. Required: an unpinned add-on resolves to whatever is latest at apply time. Bump together with kubernetes\_version. | `string` | n/a | yes |
 | <a name="input_kubernetes_version"></a> [kubernetes\_version](#input\_kubernetes\_version) | Kubernetes version for the EKS cluster. Pin a version in standard support (avoid extended-support versions). | `string` | n/a | yes |
 | <a name="input_log_retention_days"></a> [log\_retention\_days](#input\_log\_retention\_days) | Retention for the EKS control-plane log group. Unmanaged, EKS creates it with no expiry and audit logs accumulate forever. | `number` | n/a | yes |
 | <a name="input_max_size"></a> [max\_size](#input\_max\_size) | Maximum number of nodes | `number` | n/a | yes |
@@ -58,7 +58,7 @@ No resources.
 | <a name="input_public_access_cidrs"></a> [public\_access\_cidrs](#input\_public\_access\_cidrs) | CIDRs allowed to reach the public API endpoint. Tighten this per environment (e.g. office/CI egress ranges). | `list(string)` | n/a | yes |
 | <a name="input_region"></a> [region](#input\_region) | AWS region to create the resources | `string` | n/a | yes |
 | <a name="input_tags"></a> [tags](#input\_tags) | A map of tags to add to all AWS resources | `map(string)` | n/a | yes |
-| <a name="input_vpc_cni_version"></a> [vpc\_cni\_version](#input\_vpc\_cni\_version) | Pin the vpc-cni add-on version. Null resolves the latest compatible with kubernetes\_version. | `string` | n/a | yes |
+| <a name="input_vpc_cni_version"></a> [vpc\_cni\_version](#input\_vpc\_cni\_version) | vpc-cni add-on version. Required: an unpinned add-on resolves to whatever is latest at apply time. Bump together with kubernetes\_version. | `string` | n/a | yes |
 
 ## Outputs
 

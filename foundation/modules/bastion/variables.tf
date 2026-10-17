@@ -41,7 +41,7 @@ variable "vpc_cidr" {
 
 variable "kubectl_version" {
   type        = string
-  description = "kubectl version to install from the Amazon EKS S3 bucket (reached via the S3 gateway endpoint, no internet egress). Keep within one minor of the cluster version. The build date is auto-discovered from the bucket."
+  description = "kubectl version (full x.y.z) to install from the in-region tooling bucket, reached via the S3 gateway endpoint with no internet egress. The deploy workflow seeds that exact version from AWS's amazon-eks bucket, discovering the newest build date there. Keep within one minor of the cluster version."
   default     = "1.35.0"
 }
 

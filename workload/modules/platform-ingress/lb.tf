@@ -8,7 +8,7 @@
 #
 # Declared here, the load balancer is a node in the dependency graph. Terraform
 # holds the lb -> subnet edge and tears them down in order, by construction rather
-# than by a drain script that has to out-guess two operators (design §1).
+# than by a drain script that has to out-guess two operators (ARCHITECTURE.md §3).
 resource "aws_lb" "platform" {
   name               = "${var.project_name}-platform-ingress"
   load_balancer_type = "application"
@@ -50,8 +50,8 @@ resource "aws_lb" "platform" {
 
 # Plain HTTP while the load balancer is internal and reachable only from inside the
 # VPC. When the external path arrives (`enable-external-app-access`) this is where
-# an ACM certificate and a redirect from 80 attach — one of the reasons decision §2
-# chose an ALB over an NLB.
+# an ACM certificate and a redirect from 80 attach — one of the reasons this is an
+# ALB rather than an NLB.
 resource "aws_lb_listener" "platform" {
   load_balancer_arn = aws_lb.platform.arn
   port              = var.listener_port

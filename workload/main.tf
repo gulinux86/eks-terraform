@@ -24,7 +24,7 @@ module "eks_aws_load_balancer_controller" {
 # that `terraform destroy` holds the edge from the load balancer to the subnets it
 # occupies. Previously a controller created that load balancer in response to a
 # Gateway in Git, it never entered state, and its ENIs held the private subnets
-# through four failed destroys (ARCHITECTURE.md §3, design §1).
+# through four failed destroys (ARCHITECTURE.md §3, §11).
 #
 # The cluster's only involvement is a TargetGroupBinding, which registers pod IPs
 # into a target group it does not own.
@@ -46,13 +46,12 @@ module "platform_ingress" {
   depends_on = [module.eks_aws_load_balancer_controller]
 }
 
-# Argo CD. Installed last in the workload layer, which is itself the last layer
-# applied — so it lands on a cluster that already has its network, nodes and
-# load-balancer controller in place.
+# Argo CD. Installed after the load-balancer controller, in the last layer applied —
+# so it lands on a cluster that already has its network, nodes and controllers.
 #
-# It is deliberately installed and left alone: no root Application, no repository
-# wired up. What it establishes is the CRDs and controllers, so that from here on
-# custom resources can be delivered through Argo instead of through Terraform.
+# This module installs Argo CD bare: no Application, no repository. What it
+# establishes is the CRDs and controllers; `argocd_bootstrap` below wires the
+# repository up once they exist.
 module "argocd" {
   source        = "./modules/argocd"
   tags          = data.terraform_remote_state.foundation.outputs.tags
