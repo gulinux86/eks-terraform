@@ -1,6 +1,5 @@
 # bootstrap — GitHub Actions OIDC roles + KMS-encrypted state bucket (one-time, per account)
 
-
 ## Requirements
 
 | Name | Version |
@@ -52,7 +51,7 @@ No modules.
 | <a name="input_plan_role_name"></a> [plan\_role\_name](#input\_plan\_role\_name) | Name of the read-only IAM role assumed by terraform-plan | `string` | `"github-actions-eks-plan"` | no |
 | <a name="input_region"></a> [region](#input\_region) | AWS region (IAM is global, but the provider needs a region) | `string` | `"us-east-1"` | no |
 | <a name="input_state_bucket_name"></a> [state\_bucket\_name](#input\_state\_bucket\_name) | S3 bucket that stores the foundation/workload remote state. Must match the bucket in environments/<env>/backend.hcl. | `string` | `"eks-development-tfstate-889384902110"` | no |
-| <a name="input_tags"></a> [tags](#input\_tags) | Tags applied to the created IAM resources | `map(any)` | <pre>{<br/>  "Layer": "bootstrap",<br/>  "ManagedBy": "terraform",<br/>  "Project": "eks"<br/>}</pre> | no |
+| <a name="input_tags"></a> [tags](#input\_tags) | Tags applied to the created IAM resources | `map(string)` | <pre>{<br/>  "Layer": "bootstrap",<br/>  "ManagedBy": "terraform",<br/>  "Project": "eks"<br/>}</pre> | no |
 
 ## Outputs
 

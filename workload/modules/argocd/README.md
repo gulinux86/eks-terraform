@@ -19,7 +19,8 @@ From here the boundary is meant to be:
 
 ## Deliberately not included
 
-- **No root Application / app-of-apps.** Nothing is wired to a Git repository yet.
+- **No root Application / app-of-apps.** This module wires nothing to a Git
+  repository; the sibling `argocd-bootstrap` module does that, once the CRDs exist.
 - **No repository credentials.** A private config repo would need a secret, which
   needs a source (a Terraform-managed Secret, or External Secrets).
 - **No ingress, no TLS, no exposed UI.** The Service is `ClusterIP`.
@@ -28,7 +29,7 @@ From here the boundary is meant to be:
   to avoid, so migrating it is its own reviewed change — not a side effect of this
   one.
 
-## Sizing — why the node group is two nodes
+## Sizing — why the node group is two nodes (as first measured)
 
 The VPC CNI caps pods per node by ENI capacity, not by CPU or memory:
 
@@ -43,7 +44,9 @@ The VPC CNI caps pods per node by ENI capacity, not by CPU or memory:
 ```
 
 Seven into five does not go: two pods would stay `Pending` indefinitely. Hence
-`desired_size = 2` in `hml`. `ha_enabled` stays **false** — HA adds a three-pod
+`desired_size = 2` in `hml`. That measurement was taken on `t3.small`; the node
+group now runs `m7i-flex.large`, which has a higher pod ceiling, so the two-node
+size carries headroom that has not been re-measured (ARCHITECTURE.md §5, §12). `ha_enabled` stays **false** — HA adds a three-pod
 redis-ha cluster plus extra replicas and does not fit this node group at all.
 
 ## Access

@@ -36,7 +36,8 @@ hands the cluster to Argo CD.
 - **Blast radius.** A bad `workload` apply cannot corrupt or lock `foundation` state.
 - **Cost.** `foundation/outputs.tf` is an API: renaming an output passes every static
   check and fails at run time in the other layer. `scripts/check-layer-contract.sh`
-  compares the two lists in CI. Ordering is manual.
+  compares the two lists in CI — names only: an output that keeps its name and
+  changes type or meaning still passes. Ordering is manual.
 
 ## 3. Networking
 
@@ -209,8 +210,8 @@ Delivered by Argo CD (waves 9 and 10), not as an AWS add-on.
   GitHub stamps `environment:<name>` only for a job declaring an Environment. **The
   Environment's branch policy is load-bearing:** without it a pull request could
   declare the Environment and mint the deploy claim itself.
-- **Deploys are never automatic on merge.** `workflow_dispatch`, gated on tests and
-  Trivy, applying a saved plan.
+- **Deploys are never automatic on merge.** `workflow_dispatch`, gated on tests,
+  `validate` and Trivy, applying a saved plan.
 - **The plan role holds no write permission at all**, including the state lock — hence
   `-lock=false`, and `-refresh=false` for `workload`, whose in-cluster resources would
   need an Access Entry it deliberately lacks.
@@ -250,6 +251,12 @@ Delivered by Argo CD (waves 9 and 10), not as an AWS add-on.
 `hml` and `prod` are isolated by distinct VPC CIDRs, state keys and AWS roles. `hml`
 is destroyed between sessions, which shapes several defaults — `Delete` reclaim, 24h
 node expiry, a permissive API CIDR. Each is marked where it differs from prod.
+
+**`prod` is declared, not provisioned.** Its tfvars carry a placeholder account
+(`000000000000`) in `cluster_admin_role_arns`, and its `backend.hcl` points at the
+same state bucket as `hml`, in the `hml` account. Bootstrapping a real prod account
+means running `bootstrap` there, replacing the placeholder, and deciding whether
+prod state stays in the shared bucket (§12).
 
 ## 11. Teardown
 
