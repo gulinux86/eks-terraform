@@ -111,14 +111,26 @@ renders an empty topology that looks like a mesh problem.
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `terraform-plan` | PR, dispatch | `fmt`, `validate`, `plan` per layer; comments on the PR |
-| `terraform-test` | PR, dispatch | `terraform test` on critical modules — mocked, no credentials |
+| `terraform-plan` | PR, dispatch | `validate` first (credential-free), then `plan` per layer; comments on the PR |
+| `terraform-test` | PR, dispatch | `terraform test` on every module with a `tests/` directory — mocked, no credentials |
 | `security-scan` | PR, dispatch | Trivy IaC scan; fails on HIGH/CRITICAL |
-| `terraform-deploy` | dispatch (env + layer) | Gated on tests + Trivy, then `plan -out` → `apply tfplan` |
+| `terraform-deploy` | dispatch (env + layer) | Gated on tests, validate and Trivy, then `plan -out` → `apply tfplan` |
 | `terraform-destroy` | dispatch (env + layer + typed confirm) | Ordered teardown (§11) |
+
+Files prefixed `_` are reusable (`on: workflow_call`) and are not dispatched directly.
+The deploy's gates call the same workflows the pull-request checks call, so a gate
+cannot drift from the check it mirrors. AWS auth comes from a composite action in
+[`ci-templates`](https://github.com/gulinux86/ci-templates), pinned by commit SHA.
+
+**Adding a test suite needs no workflow edit** — the module list is derived from
+whichever directories contain `tests/`.
 
 Deploys are never automatic on merge. `master` is the single deploy source;
 pull-request plans always resolve to `hml`.
+
+Pull-request checks are **advisory**: there is no branch protection, so they report
+but do not block a merge. Deliberate for a single-maintainer portfolio, and the first
+thing to turn on if that changes (§12).
 
 Two roles: the plan role is read-only and trusted for `:pull_request`; the deploy role
 is write and trusted **only** for `:environment:<env>`. GitHub stamps that claim only

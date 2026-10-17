@@ -210,6 +210,33 @@ Delivered by Argo CD (waves 9 and 10), not as an AWS add-on.
 - **Gates:** `fmt`, `validate`, the layer-contract check, module tests with mocked
   providers, and Trivy. Every `.trivyignore` entry needs a written reason and a
   pointer to the section that accepts the trade-off.
+- **Credential-free checks run before anything assumes a role.** `_terraform-validate`
+  uses `init -backend=false`, so formatting and validity are decided without AWS,
+  state or network; the plan waits on it. Code that does not type-check would fail a
+  plan anyway, having assumed a role for nothing. It also covers the layer roots,
+  which the module suites do not — those only `fmt` modules that have tests.
+- **Reusable workflows, one implementation per check.** Files prefixed `_` are
+  `on: workflow_call`; the unprefixed ones carry triggers. The deploy's gates call the
+  same workflows the pull-request checks call, rather than repeating their steps —
+  they used to be copies, and two had already drifted: the deploy's test gate had lost
+  an `init` and its scan gate the SARIF upload.
+  - The module list is **derived** from whichever directories contain `tests/`. It was
+    a hand-written matrix in two files, and forgetting one meant the deploy gate
+    silently skipped a new suite.
+  - **Sharp edge:** a called workflow cannot hold a permission its caller lacks. The
+    run is rejected at validation — `startup_failure`, no job, no log, and nothing in
+    either file looking wrong. An expression on `permissions` is not valid syntax, so
+    the caller must grant what the called workflow declares even when an input
+    disables the step that needs it.
+- **AWS auth is one composite action**, in [`ci-templates`](https://github.com/gulinux86/ci-templates),
+  pinned by commit SHA. A tag is mutable: whoever controls that repository could
+  repoint it and every consumer would run different code with no diff
+  (`tj-actions/changed-files`, 2025). A composite action rather than a reusable
+  workflow because it is steps, not a job — it runs on the caller's runner, and the
+  credentials it exports are there for what follows.
+- **The destroy has no gates, deliberately.** A failing test must not block a teardown
+  someone needs — a recovery teardown is exactly when the repository is in a state
+  that breaks checks. Its guard is the typed confirmation instead.
 
 ## 10. Environments
 
@@ -271,6 +298,7 @@ EKS cluster         →   eks-cluster-sg     →   the VPC
 | Consolidation | On | Requires `requests=limits` for non-CPU resources on workloads |
 | Ingress edge | Internal ALB, one gateway | `internet-facing` + ACM + WAF |
 | ALB controller policy | Wider than the job it now does | Size it to registration |
+| Branch protection | None on `master`. Every pull-request check is advisory: they run, they report, and the merge button works regardless | Required status checks, and no direct push to `master`. Deliberate for a single-maintainer portfolio — the signal is there and the author reads it — and the first thing to turn on the moment anyone else can commit |
 | Observability | In-cluster Prometheus + Grafana + Kiali; retention in hours, no volume, so metrics do not survive a teardown | Amazon Managed Prometheus for retention, with Grafana — managed or in-cluster — reading from it. Worth doing when there is a series anyone would compare against yesterday |
 | Alerting | None. Alertmanager deliberately absent | A destination and an on-call story first; the component second |
 | Grafana image | Pinned to 12.1.1, because chart 90.0.0's `13.2.1-distroless` default ships without the core datasource plugins | Unpin when the chart moves to a 13.x image that is not distroless |

@@ -38,6 +38,16 @@ jobs:
     with:
       contract-script: ./scripts/check-layer-contract.sh
 
+  # Gate 1b — formatting and validity of the layer roots, credential-free.
+  #
+  # The module suites only `fmt` the modules that have tests, so foundation/*.tf and
+  # workload/*.tf were never checked before an apply. A malformed root would reach
+  # the apply step and fail there, after the write role was assumed.
+  validate:
+    uses: ./.github/workflows/_terraform-validate.yml
+    with:
+      layers: '["foundation", "workload"]'
+
   # Gate 2 — Trivy IaC scan, the same workflow the pull-request check calls.
   #
   # SARIF upload is off here on purpose: code scanning results belong to a pull
@@ -48,7 +58,7 @@ jobs:
       upload-sarif: false
 
   deploy:
-    needs: [test, security] # apply only after every gate passes
+    needs: [test, validate, security] # apply only after every gate passes
     runs-on: ubuntu-latest
     # Ties to the GitHub Environment: `prod` carries the required reviewer, so a
     # prod run pauses for approval before this job starts.
