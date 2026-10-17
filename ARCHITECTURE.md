@@ -137,6 +137,13 @@ hands the cluster to Argo CD.
   repository it governs can be widened by anyone who can commit there.
   - Chart repositories count as sources — listing only the Git repository fails every
     chart-based component.
+  - **Unguarded coupling:** `platform-gitops` hardcodes five names this layer
+    generates — the cluster name in `karpenter.sh/discovery`, the node role, the
+    interruption queue. `foundation/outputs.tf` publishes all of them, and nothing
+    checks that the manifests match. Renaming `project_name` would leave Karpenter
+    unable to launch a node, with no diff in this repository and no failing check.
+    This is the cross-repository version of exactly what
+    `scripts/check-layer-contract.sh` catches inside it.
   - **Sharp edge:** Helm 3 does not upgrade CRDs. `crds.keep = true` so uninstalling
     never cascade-deletes live `Application` objects.
 
@@ -298,6 +305,11 @@ EKS cluster         →   eks-cluster-sg     →   the VPC
 | Consolidation | On | Requires `requests=limits` for non-CPU resources on workloads |
 | Ingress edge | Internal ALB, one gateway | `internet-facing` + ACM + WAF |
 | ALB controller policy | Wider than the job it now does | Size it to registration |
+| Personal notes in history | Three interview-preparation files sat in `docs/` of this **public** repository from June to October 2026, carrying a company name, a salary figure and a self-assessed skills gap. Removed from `HEAD` and gitignored; still reachable in older commits | `git filter-repo --path docs/ --invert-paths` followed by a force-push, which rewrites every commit hash. Worth doing, and worth doing deliberately rather than in the middle of other work |
+| Cross-repo contract | `platform-gitops` hardcodes five names Terraform generates; nothing verifies they match | A check that reads `foundation/outputs.tf` and greps the manifests, the way `check-layer-contract.sh` does inside this repo |
+| Trivy's blind spot | The scan does not read tfvars, so `public_access_cidrs = ["0.0.0.0/0"]` and `endpoint_public_access = true` never produce a finding. Two `.trivyignore` entries therefore suppress nothing | Pass `--tf-vars` per environment, and expect both entries to start doing real work |
+| Scan threshold | The gate fails on HIGH/CRITICAL only. Six findings sit below it, unreviewed: no VPC flow logs, an unversioned bastion tooling bucket, log groups on the AWS-managed key, a security-group rule with no description | Decide each one rather than leaving the threshold to decide. Flow logs are the one with real forensic value |
+| Module test coverage | 5 of 12 modules have suites. `bastion` is the gap that matters — nothing stops `associate_public_ip_address = true` | A suite asserting no public IP, SSM-only access, and no ingress rules |
 | Branch protection | None on `master`. Every pull-request check is advisory: they run, they report, and the merge button works regardless | Required status checks, and no direct push to `master`. Deliberate for a single-maintainer portfolio — the signal is there and the author reads it — and the first thing to turn on the moment anyone else can commit |
 | Observability | In-cluster Prometheus + Grafana + Kiali; retention in hours, no volume, so metrics do not survive a teardown | Amazon Managed Prometheus for retention, with Grafana — managed or in-cluster — reading from it. Worth doing when there is a series anyone would compare against yesterday |
 | Alerting | None. Alertmanager deliberately absent | A destination and an on-call story first; the component second |

@@ -1,8 +1,24 @@
 # Trivy ignore file — reviewed, documented exceptions only.
 #
 # Each entry MUST carry a reason. These are accepted *portfolio* trade-offs that
-# are already explained in ARCHITECTURE.md (§4, §12). Confirm the exact IDs that
-# fire against the first CI scan and TIGHTEN these for prod.
+# are already explained in ARCHITECTURE.md (§4, §12). TIGHTEN these for prod.
+#
+# VERIFIED 2026-10-17, and two of the three do not fire:
+#
+#   AVD-AWS-0054  fires (CRITICAL). This suppression does real work.
+#   AVD-AWS-0040  does not fire.
+#   AVD-AWS-0041  does not fire.
+#
+# Not because the risk went away — because Trivy does not read tfvars, and
+# `endpoint_public_access = true` with `public_access_cidrs = ["0.0.0.0/0"]` lives
+# in environments/<env>/terraform.tfvars. The scan sees `var.public_access_cidrs`
+# and cannot resolve it, so the finding never appears and the suppression is never
+# needed.
+#
+# They are kept rather than deleted precisely because of that: the posture they
+# describe is real and the scanner is blind to it. Deleting them would leave the
+# repository looking clean on a risk nobody withdrew. If `--tf-vars` is ever added
+# to the scan, expect both to start firing and to be doing real work again.
 #
 # How to verify locally:
 #   trivy config --severity HIGH,CRITICAL .

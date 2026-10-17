@@ -45,3 +45,12 @@ terraform.rc
 # Tooling local (não faz parte da infra entregue)
 .claude/
 openspec/
+
+# Personal notes never belong in a public repository. Three interview-preparation
+# files lived in docs/ from June to October 2026, carrying a company name, a salary
+# figure and a self-assessed skills gap — readable by anyone, including a recruiter
+# at the company named in them. Removed from HEAD; copies kept outside the repo.
+#
+# They remain in the git history. Rewriting that needs git-filter-repo and a
+# force-push — see the note in ARCHITECTURE.md §12.
+docs/
