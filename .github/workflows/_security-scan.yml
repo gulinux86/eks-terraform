@@ -34,9 +34,19 @@ on:
         required: false
         default: true
 
+# `security-events: write` is for the SARIF upload step alone — the scan itself only
+# reads files.
+#
+# Every caller must grant it, including one that passes `upload-sarif: false`: a
+# reusable workflow cannot hold a permission its caller lacks, and the run is rejected
+# at validation with `startup_failure` and no log at all. That is how this was found,
+# and the alternative — an expression on `permissions` — is not valid syntax.
+#
+# Granting it where the upload is disabled is harmless: the step that uses it is
+# behind the input.
 permissions:
   contents: read
-  security-events: write # upload SARIF to code scanning
+  security-events: write
 
 jobs:
   trivy:
