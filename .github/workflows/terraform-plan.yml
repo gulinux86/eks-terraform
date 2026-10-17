@@ -75,6 +75,7 @@ jobs:
         with:
           environment: ${{ env.ENV_NAME }}
           role: plan
+          terraform-version: "1.16.6"
           plan-role-arn: ${{ env.ENV_NAME == 'prod' && secrets.PROD_PLAN_ROLE_ARN || secrets.HML_PLAN_ROLE_ARN }}
 
       # fmt and validate already ran in the `validate` job, credential-free. This

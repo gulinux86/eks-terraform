@@ -87,6 +87,7 @@ jobs:
         with:
           environment: ${{ env.ENVIRONMENT }}
           role: deploy
+          terraform-version: "1.16.6"
           deploy-role-arn: ${{ env.ENVIRONMENT == 'prod' && secrets.PROD_DEPLOY_ROLE_ARN || secrets.HML_DEPLOY_ROLE_ARN }}
 
       - name: Resolve layers
