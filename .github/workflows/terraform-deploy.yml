@@ -21,6 +21,11 @@ on:
 permissions:
   contents: read
   id-token: write # OIDC
+  # Granted because the security gate calls a reusable workflow that declares it. A
+  # called workflow cannot hold a permission its caller lacks — omitting this
+  # rejects the whole run at validation, with `startup_failure` and no log. The gate
+  # passes `upload-sarif: false`, so nothing here actually writes to code scanning.
+  security-events: write # OIDC
 
 jobs:
   # Gate 1 — module unit tests and the layer contract, both credential-free.
