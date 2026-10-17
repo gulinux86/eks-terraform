@@ -59,6 +59,7 @@ jobs:
         with:
           environment: ${{ env.ENVIRONMENT }}
           role: deploy
+          terraform-version: "1.16.6"
           deploy-role-arn: ${{ env.ENVIRONMENT == 'prod' && secrets.PROD_DEPLOY_ROLE_ARN || secrets.HML_DEPLOY_ROLE_ARN }}
 
       - name: Resolve layers
@@ -320,21 +321,23 @@ jobs:
         if: contains(env.LAYERS, 'foundation')
         run: |
           set -uo pipefail
-          CLUSTER=$(terraform -chdir=foundation init -input=false \
-            -backend-config="environments/${ENVIRONMENT}/backend.hcl" >/dev/null 2>&1 \
-            && terraform -chdir=foundation output -raw cluster_name 2>/dev/null || true)
-          # Same shape check as the drain: an empty state makes `output -raw` print a
-          # warning and exit 0, and that text is not a cluster name.
-          case "$CLUSTER" in
-            ""|*[!a-zA-Z0-9_-]*) CLUSTER="" ;;
-          esac
-          [ -n "$CLUSTER" ] || { echo "no cluster in state; nothing to check"; exit 0; }
+          terraform -chdir=foundation init -input=false \
+            -backend-config="environments/${ENVIRONMENT}/backend.hcl" >/dev/null 2>&1 || true
 
-          VPC=$(aws eks describe-cluster --name "$CLUSTER" \
-                --query 'cluster.resourcesVpcConfig.vpcId' --output text 2>/dev/null || true)
+          # The VPC from the state, the same way the two steps around this one read
+          # it — not from `terraform output cluster_name` and then describe-cluster.
+          #
+          # That was the last reader of the outputs, and it failed in exactly the run
+          # this check matters most in. After a partial destroy the outputs have been
+          # rewritten by -target and the cluster may already be gone, so the step
+          # printed "nothing to check" and stood aside while the VPC it guards was
+          # still in state, still undeleted, and still holding whatever blocked it.
+          # The VPC resource outlives both the output and the cluster.
+          VPC=$(terraform -chdir=foundation show -json 2>/dev/null \
+                | jq -r '[.. | objects | select(.type? == "aws_vpc") | .values.id] | first // empty' 2>/dev/null)
           case "$VPC" in
             vpc-*) ;;
-            *) echo "no live VPC; nothing to check"; exit 0 ;;
+            *) echo "no VPC in state; nothing to check"; exit 0 ;;
           esac
 
           echo "checking VPC $VPC"

@@ -18,10 +18,14 @@ on:
         description: JSON array of layer directories to validate, e.g. '["foundation","workload"]'.
         type: string
         required: true
+      # Exact, not a range. `~> 1.10` resolved to whatever 1.x was newest on the day
+      # of the run, so plan and apply could run different binaries with no diff in
+      # this repository. The provider lockfile pins providers, not the CLI. Bump
+      # every occurrence together: grep -rn 'terraform-version' .github/
       terraform-version:
         type: string
         required: false
-        default: "~> 1.10"
+        default: "1.16.6"
 
 permissions:
   contents: read
