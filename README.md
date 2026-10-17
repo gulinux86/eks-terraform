@@ -125,6 +125,12 @@ cannot drift from the check it mirrors. AWS auth comes from a composite action i
 **Adding a test suite needs no workflow edit** — the module list is derived from
 whichever directories contain `tests/`.
 
+Five of twelve modules have suites: `network`, `cluster`, `eks-addons`, `karpenter`,
+`platform-ingress` — 12 run blocks, 51 assertions, all with mocked providers. They
+assert security invariants, not resource counts: that public subnets carry no
+`role/elb` tag, that the ingress load balancer is `internal`, that Karpenter can only
+terminate what carries both of its tags. `bastion` is the gap that matters (§12).
+
 Deploys are never automatic on merge. `master` is the single deploy source;
 pull-request plans always resolve to `hml`.
 
