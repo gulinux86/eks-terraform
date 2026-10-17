@@ -83,9 +83,8 @@ jobs:
       # matters more than the eight lines it saves: two copies can receive a fix
       # separately, and the failure grants the wrong role rather than erroring.
       - name: Authenticate to AWS and install Terraform
-        uses: gulinux86/ci-templates/.github/actions/aws-terraform-setup@9ba44da1477e24b8a37a68a568af0b56d7f7c077 # ci-templates@master, 2026-10-17
+        uses: gulinux86/ci-templates/.github/actions/aws-terraform-setup@5532dca25b120e3cf5c2396b72b9fb5c5eb3d64c # ci-templates@master, 2026-10-17 (PR #1)
         with:
-          environment: ${{ env.ENVIRONMENT }}
           role: deploy
           terraform-version: "1.16.6"
           deploy-role-arn: ${{ env.ENVIRONMENT == 'prod' && secrets.PROD_DEPLOY_ROLE_ARN || secrets.HML_DEPLOY_ROLE_ARN }}
