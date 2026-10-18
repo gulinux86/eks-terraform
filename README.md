@@ -123,7 +123,6 @@ Files prefixed `_` are reusable (`on: workflow_call`) and are not dispatched dir
 The deploy's gates call the same workflows the pull-request checks call, so a gate
 cannot drift from the check it mirrors. AWS auth comes from a composite action in
 [`ci-templates`](https://github.com/gulinux86/ci-templates), pinned by commit SHA.
-Dependabot (`.github/dependabot.yml`) proposes new SHAs for the pinned actions weekly.
 
 **Adding a test suite needs no workflow edit** — the module list is derived from
 whichever directories contain `tests/`.
@@ -160,7 +159,7 @@ workload/      same shape
                modules/{aws-load-balancer-controller,platform-ingress,
                         storage,argocd,argocd-bootstrap}/
 scripts/       check-layer-contract.sh
-.github/       plan · test · security-scan · docs · deploy · destroy · dependabot
+.github/       plan · test · security-scan · docs · deploy · destroy
 .trivyignore   accepted exceptions — each needs a written reason
 ```
 
