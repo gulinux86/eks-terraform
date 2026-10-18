@@ -53,7 +53,9 @@ jobs:
         run: |
           set -euo pipefail
           FAILED=0
-          for README in $(grep -rl --include=README.md 'BEGIN_TF_DOCS' . | sort); do
+          # The whole marker line, not the bare word: the root README mentions the
+          # marker in prose and is not terraform-docs output.
+          for README in $(grep -rlx --include=README.md '<!-- BEGIN_TF_DOCS -->' . | sort); do
             DIR=$(dirname "$README")
             if terraform-docs -c .terraform-docs.yml --output-check "$DIR" >/dev/null; then
               echo "ok      $DIR"

@@ -9,6 +9,14 @@
 # Regenerate one README:  terraform-docs -c .terraform-docs.yml <dir>
 formatter: markdown table
 
+settings:
+  # Off: with it on, the Providers table shows the version in whatever
+  # .terraform.lock.hcl sits next to the module. The modules with tests carry their
+  # own lockfiles from `terraform test` (aws 6.49 in one, 6.63 in another), so the
+  # README would churn on every test init and differ between machines. The
+  # constraint in the code is what a README should document.
+  lockfile: false
+
 output:
   file: README.md
   mode: inject
