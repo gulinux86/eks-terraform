@@ -1,5 +1,6 @@
 # eks-addons module — EKS managed add-ons (vpc-cni, coredns, kube-proxy, metrics-server, EBS CSI, Pod Identity agent)
 
+<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 No requirements.
@@ -45,3 +46,4 @@ No modules.
 | Name | Description |
 | ---- | ----------- |
 | <a name="output_addon_versions"></a> [addon\_versions](#output\_addon\_versions) | Resolved version of each managed core add-on |
+<!-- END_TF_DOCS -->

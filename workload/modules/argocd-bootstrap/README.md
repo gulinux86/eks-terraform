@@ -36,6 +36,7 @@ at apply time and never asks Terraform to understand them.
 tells Argo CD to delete every child and the resources they own. The teardown depends
 on that ordering — see ARCHITECTURE.md §11.
 
+<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 No requirements.
@@ -71,3 +72,4 @@ No modules.
 ## Outputs
 
 No outputs.
+<!-- END_TF_DOCS -->

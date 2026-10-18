@@ -11,6 +11,7 @@ default, so a PVC with no explicit class stays `Pending` reporting
 
 It lives in `workload` because that is the only layer with the `kubernetes`
 provider — see ARCHITECTURE.md §2.
+<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 No requirements.
@@ -40,3 +41,4 @@ No modules.
 ## Outputs
 
 No outputs.
+<!-- END_TF_DOCS -->

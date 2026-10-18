@@ -64,6 +64,7 @@ is an ALB rather than an NLB.
   connection draining.
 - **`spec.networking` on the binding mutates a security group Terraform manages**,
   which shows as drift on the next plan. Drift, not a destroy failure.
+<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 | Name | Version |
@@ -119,3 +120,4 @@ No modules.
 | <a name="output_lb_arn"></a> [lb\_arn](#output\_lb\_arn) | Load balancer ARN, for operators inspecting target health |
 | <a name="output_security_group_id"></a> [security\_group\_id](#output\_security\_group\_id) | The load balancer's security group. The TargetGroupBinding's networking rules allow ingress to the pods from this group. |
 | <a name="output_target_group_arn"></a> [target\_group\_arn](#output\_target\_group\_arn) | Target group the cluster registers gateway pods into. Consumed by the TargetGroupBinding in this module, never published to Git — it names an AWS account. |
+<!-- END_TF_DOCS -->

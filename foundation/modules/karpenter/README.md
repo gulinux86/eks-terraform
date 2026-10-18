@@ -40,6 +40,7 @@ comes from a public Git repository, so that ARN would be committed, per account.
 Identity binds role to namespace and ServiceAccount from the AWS side, and the
 manifest needs to know nothing.
 
+<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 No requirements.
@@ -92,3 +93,4 @@ No modules.
 | <a name="output_discovery_tag_value"></a> [discovery\_tag\_value](#output\_discovery\_tag\_value) | Value of the karpenter.sh/discovery tag on subnets and security groups. The EC2NodeClass selectors must match it. |
 | <a name="output_interruption_queue_name"></a> [interruption\_queue\_name](#output\_interruption\_queue\_name) | Queue the controller polls for interruption events; goes into the Helm values as settings.interruptionQueue. |
 | <a name="output_node_role_name"></a> [node\_role\_name](#output\_node\_role\_name) | Role Karpenter-provisioned nodes assume. The EC2NodeClass in the GitOps repo references it by NAME, not ARN. |
+<!-- END_TF_DOCS -->

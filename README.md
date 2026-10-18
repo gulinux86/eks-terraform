@@ -115,6 +115,7 @@ renders an empty topology that looks like a mesh problem.
 | `terraform-plan` | PR, dispatch | `validate` first (credential-free), then `plan` per layer; comments on the PR |
 | `terraform-test` | PR, dispatch | `terraform test` on every module with a `tests/` directory — mocked, no credentials |
 | `security-scan` | PR, dispatch | Trivy IaC scan; fails on HIGH/CRITICAL |
+| `terraform-docs` | PR, dispatch | Fails when a README between the `BEGIN_TF_DOCS` markers is out of date |
 | `terraform-deploy` | dispatch (env + layer) | Gated on tests, validate and Trivy, then `plan -out` → `apply tfplan` |
 | `terraform-destroy` | dispatch (env + layer + typed confirm) | Ordered teardown (§11) |
 
@@ -122,6 +123,7 @@ Files prefixed `_` are reusable (`on: workflow_call`) and are not dispatched dir
 The deploy's gates call the same workflows the pull-request checks call, so a gate
 cannot drift from the check it mirrors. AWS auth comes from a composite action in
 [`ci-templates`](https://github.com/gulinux86/ci-templates), pinned by commit SHA.
+Dependabot (`.github/dependabot.yml`) proposes new SHAs for the pinned actions weekly.
 
 **Adding a test suite needs no workflow edit** — the module list is derived from
 whichever directories contain `tests/`.
@@ -158,9 +160,10 @@ workload/      same shape
                modules/{aws-load-balancer-controller,platform-ingress,
                         storage,argocd,argocd-bootstrap}/
 scripts/       check-layer-contract.sh
-.github/       plan · test · security-scan · deploy · destroy
+.github/       plan · test · security-scan · docs · deploy · destroy · dependabot
 .trivyignore   accepted exceptions — each needs a written reason
 ```
 
 Module `README.md`s are terraform-docs output under a handwritten title; regenerate
-rather than hand-editing. Adding a test suite needs no workflow edit (see CI/CD).
+with `terraform-docs -c .terraform-docs.yml <dir>` rather than hand-editing — CI
+fails the pull request otherwise. Adding a test suite needs no workflow edit (see CI/CD).

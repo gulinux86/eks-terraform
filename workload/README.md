@@ -36,6 +36,7 @@ this repository and says so about its own limits. A mismatch is silent — the t
 group registers nothing and the load balancer answers 503. See
 `modules/platform-ingress/README.md`.
 
+<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 | Name | Version |
@@ -89,3 +90,4 @@ group registers nothing and the load balancer answers 503. See
 ## Outputs
 
 No outputs.
+<!-- END_TF_DOCS -->

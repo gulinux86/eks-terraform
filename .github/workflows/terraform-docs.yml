@@ -1,0 +1,67 @@
+# Fails a pull request whose module README no longer matches its variables/outputs.
+#
+# Module READMEs are terraform-docs output under a handwritten title, and nothing
+# used to enforce regenerating them: six had drifted, some carrying a duplicated
+# stale table below the current one. --output-check renders each README in memory
+# and compares it to the file, so the fix is always the same — run terraform-docs
+# locally and commit the result.
+#
+# The directory list is discovered, not written down: every README.md carrying the
+# BEGIN_TF_DOCS marker is checked. A new module opts in by adding the markers.
+name: terraform-docs
+
+on:
+  pull_request:
+    branches: [master, develop, main]
+    paths:
+      - "**.tf"
+      - "**/README.md"
+      - ".terraform-docs.yml"
+      - ".github/workflows/terraform-docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tf-docs-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned with its checksum, from the release's sha256sum file. Bump both together.
+  TFDOCS_VERSION: v0.24.0
+  TFDOCS_SHA256: 9005daf969de0b50134493a2c00078b49f5f5b39d021cda7c89bf4d4f3d776d3
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - name: Install terraform-docs
+        run: |
+          set -euo pipefail
+          TARBALL="terraform-docs-${TFDOCS_VERSION}-linux-amd64.tar.gz"
+          curl -sSLo "/tmp/$TARBALL" \
+            "https://github.com/terraform-docs/terraform-docs/releases/download/${TFDOCS_VERSION}/${TARBALL}"
+          echo "${TFDOCS_SHA256}  /tmp/${TARBALL}" | sha256sum -c -
+          tar -xzf "/tmp/$TARBALL" -C /tmp terraform-docs
+          sudo install /tmp/terraform-docs /usr/local/bin/terraform-docs
+          terraform-docs --version
+
+      - name: Check READMEs are up to date
+        run: |
+          set -euo pipefail
+          FAILED=0
+          # The whole marker line, not the bare word: the root README mentions the
+          # marker in prose and is not terraform-docs output.
+          for README in $(grep -rlx --include=README.md '<!-- BEGIN_TF_DOCS -->' . | sort); do
+            DIR=$(dirname "$README")
+            if terraform-docs -c .terraform-docs.yml --output-check "$DIR" >/dev/null; then
+              echo "ok      $DIR"
+            else
+              echo "::error file=$README::out of date — run: terraform-docs -c .terraform-docs.yml $DIR"
+              FAILED=1
+            fi
+          done
+          exit $FAILED
