@@ -1,5 +1,6 @@
 # bootstrap — GitHub Actions OIDC roles + KMS-encrypted state bucket (one-time, per account)
 
+<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 | Name | Version |
@@ -61,3 +62,4 @@ No modules.
 | <a name="output_oidc_provider_arn"></a> [oidc\_provider\_arn](#output\_oidc\_provider\_arn) | ARN of the GitHub Actions OIDC identity provider |
 | <a name="output_plan_role_arn"></a> [plan\_role\_arn](#output\_plan\_role\_arn) | ARN of the read-only plan role. Set as the <ENV>\_PLAN\_ROLE\_ARN GitHub secret. |
 | <a name="output_state_bucket"></a> [state\_bucket](#output\_state\_bucket) | S3 bucket holding the foundation/workload remote state |
+<!-- END_TF_DOCS -->

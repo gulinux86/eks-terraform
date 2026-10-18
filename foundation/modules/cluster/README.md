@@ -1,6 +1,7 @@
 # cluster module — EKS control plane, KMS envelope encryption, OIDC/IRSA
 
 
+<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 No requirements.
@@ -61,3 +62,4 @@ No modules.
 | <a name="output_endpoint"></a> [endpoint](#output\_endpoint) | n/a |
 | <a name="output_oidc"></a> [oidc](#output\_oidc) | n/a |
 | <a name="output_oidc_provider_arn"></a> [oidc\_provider\_arn](#output\_oidc\_provider\_arn) | ARN of the cluster's IAM OIDC provider. Distinct from `oidc`, which is the issuer URL: IRSA trust policies need the ARN as the federated principal, and the URL (minus scheme) as the condition key. |
+<!-- END_TF_DOCS -->

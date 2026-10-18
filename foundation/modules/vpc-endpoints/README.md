@@ -1,5 +1,6 @@
 # vpc-endpoints module — S3 gateway + interface (PrivateLink) endpoints
 
+<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 No requirements.
@@ -38,3 +39,4 @@ No modules.
 ## Outputs
 
 No outputs.
+<!-- END_TF_DOCS -->

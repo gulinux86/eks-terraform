@@ -1,6 +1,7 @@
 # managed-node-group module — EKS managed node group (AL2023)
 
 
+<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 No requirements.
@@ -44,3 +45,4 @@ No modules.
 ## Outputs
 
 No outputs.
+<!-- END_TF_DOCS -->

@@ -75,6 +75,7 @@ chart's release notes rather than assuming the upgrade carried it.
 removing them would cascade-delete every `Application` in the cluster.
 
 
+<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 No requirements.
@@ -113,3 +114,4 @@ No modules.
 | <a name="output_initial_password_command"></a> [initial\_password\_command](#output\_initial\_password\_command) | Retrieves the generated admin password. Change it and delete the secret; it is a bootstrap credential, not a permanent one. |
 | <a name="output_namespace"></a> [namespace](#output\_namespace) | Namespace Argo CD runs in |
 | <a name="output_port_forward_command"></a> [port\_forward\_command](#output\_port\_forward\_command) | Nothing is exposed; reach the UI through this port-forward, then https://localhost:8080 |
+<!-- END_TF_DOCS -->

@@ -1,0 +1,18 @@
+# terraform-docs configuration, shared by every layer and module README.
+#
+# Inject mode rewrites only what sits between the markers, so the handwritten
+# title and design notes above them are left alone. CI runs the same config with
+# --output-check (.github/workflows/terraform-docs.yml): a variable or output
+# changed without regenerating its README fails the pull request instead of
+# drifting silently.
+#
+# Regenerate one README:  terraform-docs -c .terraform-docs.yml <dir>
+formatter: markdown table
+
+output:
+  file: README.md
+  mode: inject
+  template: |-
+    <!-- BEGIN_TF_DOCS -->
+    {{ .Content }}
+    <!-- END_TF_DOCS -->

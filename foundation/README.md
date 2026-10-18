@@ -8,6 +8,7 @@ Some outputs exist for consumers that are not Terraform at all. The `karpenter_*
 values are read by the platform GitOps repository's manifests — they are the handful
 of AWS names an in-cluster object has to match, and none of them are secrets.
 
+<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 | Name | Version |
@@ -81,3 +82,4 @@ No resources.
 | <a name="output_tooling_bucket"></a> [tooling\_bucket](#output\_tooling\_bucket) | Bucket the bastion pulls kubectl from. The deploy workflow seeds it after applying the foundation layer. |
 | <a name="output_vpc_cidr"></a> [vpc\_cidr](#output\_vpc\_cidr) | VPC CIDR, scoping the ingress load balancer's security group while it stays internal |
 | <a name="output_vpc_id"></a> [vpc\_id](#output\_vpc\_id) | VPC ID, used by the AWS Load Balancer Controller in the workload layer |
+<!-- END_TF_DOCS -->

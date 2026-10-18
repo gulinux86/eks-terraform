@@ -1,6 +1,7 @@
 # network module — VPC, public/private subnets, IGW, dual NAT, route tables
 
 
+<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 No requirements.
@@ -58,3 +59,4 @@ No modules.
 | <a name="output_subnet_pub_1b"></a> [subnet\_pub\_1b](#output\_subnet\_pub\_1b) | n/a |
 | <a name="output_vpc_cidr"></a> [vpc\_cidr](#output\_vpc\_cidr) | n/a |
 | <a name="output_vpc_id"></a> [vpc\_id](#output\_vpc\_id) | n/a |
+<!-- END_TF_DOCS -->

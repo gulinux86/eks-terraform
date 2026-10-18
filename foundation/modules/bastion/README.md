@@ -1,5 +1,6 @@
 # bastion module — SSM-managed jump host with EKS admin access
 
+<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 No requirements.
@@ -58,3 +59,4 @@ No modules.
 | <a name="output_bastion_role_arn"></a> [bastion\_role\_arn](#output\_bastion\_role\_arn) | ARN of the bastion IAM role with access to the EKS cluster |
 | <a name="output_kubectl_version"></a> [kubectl\_version](#output\_kubectl\_version) | kubectl version the bastion expects in the tooling bucket. Single-sourced so the pipeline seeds exactly what the boot script asks for. |
 | <a name="output_tooling_bucket"></a> [tooling\_bucket](#output\_tooling\_bucket) | In-region bucket the bastion installs kubectl from. Seeded by the pipeline after a foundation apply. |
+<!-- END_TF_DOCS -->
