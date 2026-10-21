@@ -344,7 +344,7 @@ So the pipeline drives Terraform rather than going around it, in two workflows:
 
 | Workflow | Does | Writes to AWS |
 |---|---|---|
-| `eks-upgrade-pr` | Checks the step is one minor, resolves each add-on's EKS-default version for it, rewrites the seven values in hml **and** prod, pushes `upgrade/eks-<minor>` | No — plan role |
+| `eks-upgrade-pr` | Checks the step is one minor, resolves each add-on's EKS-default version for it — never below the current pin, since EKS does not downgrade add-ons — rewrites the seven values in hml **and** prod, pushes `upgrade/eks-<minor>` | No — plan role |
 | `eks-upgrade` | Upgrades one environment's live cluster in phases, checking between them | Yes — deploy role, Environment-gated |
 
 A person opens the pull request between the two: one opened with `GITHUB_TOKEN`

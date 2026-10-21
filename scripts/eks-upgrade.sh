@@ -4,7 +4,7 @@
 # design — why the order is what it is, and why nothing here runs `kubectl drain`.
 #
 #   bump <minor>                  rewrite the version + six add-on pins in hml and prod
-#   preflight <env>               version skew, cluster status, EKS upgrade insights
+#   preflight <env> [--advisory]  version skew, cluster status, EKS upgrade insights
 #   workloads [--strict]          PDBs that would block a drain; workloads that would blink
 #   apply <env> <target>          plan -target -out, apply the saved plan if it has changes
 #   nodes <selector> <minor> <s>  wait until every matching node runs <minor> and is Ready
@@ -38,10 +38,20 @@ tfvar() { sed -nE "s/^$2[[:space:]]*=[[:space:]]*\"([^\"]*)\".*/\1/p" "$1"; }
 
 minor() { echo "${1#*.}"; } # "1.36" -> 36
 
+# True when version $1 >= $2. sort -V orders v1.3.10-eksbuild.3 below v1.4.0-eksbuild.1.
+version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$2" ]; }
+
 # --- bump ---------------------------------------------------------------------
 # The rule in CLAUDE.md, "version bumps travel together", done by a script rather
 # than by memory: kubernetes_version and all six pins, in both environments, in one
-# change. Each pin becomes the version EKS marks as default for the target release.
+# change.
+#
+# Each pin moves to the version EKS marks as default for the target release — unless
+# that is older than the pin already in use. EKS does not downgrade an add-on, and
+# its default can trail what an environment runs (eks-pod-identity-agent: default
+# v1.3.10 for 1.36 while hml ran v1.4.0), so the apply would fail after the control
+# plane had moved. Then the current pin is kept if the target supports it; otherwise
+# the newest compatible version above it; otherwise nothing is written.
 cmd_bump() {
   local TARGET=${1:?usage: bump <kubernetes minor, e.g. 1.36>}
   [[ $TARGET =~ ^1\.[0-9]{2}$ ]] || die "target must look like 1.36, got '$TARGET'"
@@ -74,39 +84,57 @@ cmd_bump() {
     *) warn "EKS $TARGET status is $STATUS" ;;
   esac
 
-  # Resolve every pin before touching a file, so a missing add-on leaves the tree
-  # unchanged rather than half-bumped.
-  local VAR NAME V
-  declare -A NEW
+  # Resolve every pin, for every environment, before touching a file, so a missing
+  # or impossible add-on leaves the tree unchanged rather than half-bumped.
+  local VAR NAME JSON DEFAULT COMPAT OLD V NOTE
+  declare -A NEW WHY
   for VAR in "${ADDON_VARS[@]}"; do
     NAME=${ADDON_NAME[$VAR]}
-    V=$(aws eks describe-addon-versions --region "$REGION" --addon-name "$NAME" \
-      --kubernetes-version "$TARGET" --output json | jq -r --arg k "$TARGET" '
-        [.addons[0].addonVersions[]?
-          | select(any(.compatibilities[]; .clusterVersion == $k and .defaultVersion))
-          | .addonVersion][0]
-        // .addons[0].addonVersions[0].addonVersion
-        // empty')
-    [ -n "$V" ] || die "no $NAME build is published for Kubernetes $TARGET"
-    NEW[$VAR]=$V
+    JSON=$(aws eks describe-addon-versions --region "$REGION" --addon-name "$NAME" \
+      --kubernetes-version "$TARGET" --output json)
+    DEFAULT=$(jq -r --arg k "$TARGET" '[.addons[0].addonVersions[]?
+      | select(any(.compatibilities[]; .clusterVersion == $k and .defaultVersion))
+      | .addonVersion][0] // empty' <<<"$JSON")
+    # Every version that lists the target release, newest first.
+    COMPAT=$(jq -r --arg k "$TARGET" '.addons[0].addonVersions[]?
+      | select(any(.compatibilities[]; .clusterVersion == $k)) | .addonVersion' <<<"$JSON" | sort -rV)
+    [ -n "$COMPAT" ] || die "no $NAME build is published for Kubernetes $TARGET"
+    [ -n "$DEFAULT" ] || DEFAULT=$(head -1 <<<"$COMPAT")
+
+    for ENV in "${TODO[@]}"; do
+      OLD=$(tfvar "$(tfvars "$ENV")" "$VAR")
+      [ -n "$OLD" ] || die "$(tfvars "$ENV") has no $VAR line to rewrite"
+      if version_ge "$DEFAULT" "$OLD"; then
+        V=$DEFAULT NOTE=""
+      elif grep -qxF "$OLD" <<<"$COMPAT"; then
+        V=$OLD NOTE="kept — EKS default $DEFAULT is older"
+      else
+        V=$(head -1 <<<"$COMPAT")
+        version_ge "$V" "$OLD" \
+          || die "$NAME $OLD ($ENV) has no successor for $TARGET: the newest compatible is $V, and EKS does not downgrade add-ons"
+        NOTE="newest compatible — EKS default $DEFAULT is older"
+      fi
+      NEW[$ENV:$VAR]=$V
+      WHY[$ENV:$VAR]=$NOTE
+    done
   done
 
   summary "### EKS $TARGET — version pins"
   summary ""
-  summary "| Variable | Old | New |"
-  summary "|---|---|---|"
-  local FILE OLD
+  summary "| Variable | Old | New | Note |"
+  summary "|---|---|---|---|"
+  local FILE
   for ENV in "${TODO[@]}"; do
     FILE=$(tfvars "$ENV")
     echo "== $FILE"
     for VAR in kubernetes_version "${ADDON_VARS[@]}"; do
-      [ "$VAR" = kubernetes_version ] && V=$TARGET || V=${NEW[$VAR]}
+      if [ "$VAR" = kubernetes_version ]; then V=$TARGET NOTE=""; else V=${NEW[$ENV:$VAR]} NOTE=${WHY[$ENV:$VAR]}; fi
       OLD=$(tfvar "$FILE" "$VAR")
       [ -n "$OLD" ] || die "$FILE has no $VAR line to rewrite"
       sed -i -E "s/^(${VAR}[[:space:]]*=[[:space:]]*)\"[^\"]*\"/\1\"$V\"/" "$FILE"
       [ "$(tfvar "$FILE" "$VAR")" = "$V" ] || die "failed to rewrite $VAR in $FILE"
-      printf '  %-28s %-24s -> %s\n' "$VAR" "$OLD" "$V"
-      summary "| \`$ENV\` $VAR | $OLD | **$V** |"
+      printf '  %-28s %-24s -> %-24s %s\n' "$VAR" "$OLD" "$V" "$NOTE"
+      summary "| \`$ENV\` $VAR | $OLD | **$V** | $NOTE |"
     done
   done
 
@@ -123,8 +151,11 @@ cmd_bump() {
 # --- preflight ----------------------------------------------------------------
 # Ends with REGION=, CLUSTER= and TARGET= lines; the workflow copies those (and only
 # those) into $GITHUB_ENV.
+#
+# --advisory (eks-upgrade-pr): a cluster that is not running is a notice, not an
+# error. hml is destroyed between sessions, so there that is the normal case.
 cmd_preflight() {
-  local ENV=${1:?usage: preflight <env>}
+  local ENV=${1:?usage: preflight <env> [--advisory]} ADVISORY=${2:-}
   local FILE REGION TARGET CLUSTER
   FILE=$(tfvars "$ENV")
   REGION=$(tfvar "$FILE" region)
@@ -132,8 +163,13 @@ cmd_preflight() {
   CLUSTER="$(tfvar "$FILE" project_name)-cluster"
 
   local DESC STATUS CURRENT
-  DESC=$(aws eks describe-cluster --region "$REGION" --name "$CLUSTER" --output json 2>/dev/null) \
-    || die "no cluster $CLUSTER in $REGION — run terraform-deploy for a new cluster; this workflow upgrades a live one"
+  if ! DESC=$(aws eks describe-cluster --region "$REGION" --name "$CLUSTER" --output json 2>/dev/null); then
+    if [ "$ADVISORY" = --advisory ]; then
+      echo "::notice::$CLUSTER is not running; no upgrade insights to read. eks-upgrade reads them before changing anything."
+      return 0
+    fi
+    die "no cluster $CLUSTER in $REGION — run terraform-deploy for a new cluster; this workflow upgrades a live one"
+  fi
   STATUS=$(jq -r .cluster.status <<<"$DESC")
   CURRENT=$(jq -r .cluster.version <<<"$DESC")
   [ "$STATUS" = ACTIVE ] || die "cluster is $STATUS, not ACTIVE — another update may be in progress"
