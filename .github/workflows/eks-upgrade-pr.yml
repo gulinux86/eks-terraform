@@ -52,6 +52,14 @@ jobs:
       - name: Rewrite the version pins
         run: ./scripts/eks-upgrade.sh bump "$TARGET"
 
+      # Blocking, and before anything is pushed: a version bump the platform cannot
+      # run on is not worth a pull request. Karpenter, Istio, cert-manager and Argo CD
+      # are checked against their own published matrices; components without one are
+      # listed as unverified. Reads hml's platform repository — prod tracks the same
+      # one, and eks-upgrade checks each environment again against what runs.
+      - name: Every component supports the target
+        run: ./scripts/eks-upgrade.sh compat hml "$TARGET"
+
       # Advisory here: a missing cluster is a notice, and insight errors are shown
       # without failing the job. eks-upgrade.yml repeats the check and blocks on them.
       - name: Upgrade insights for the live hml cluster

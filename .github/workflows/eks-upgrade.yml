@@ -5,6 +5,8 @@ name: eks-upgrade
 # then for prod — one cluster at a time. Step 1 is eks-upgrade-pr.yml.
 #
 #   preflight   one minor up, cluster ACTIVE, EKS upgrade insights clean
+#   compat      Karpenter, Istio, cert-manager, Argo CD support the target, per their
+#               own matrices; Applications Synced, so running = declared
 #   workloads   PDBs that would hang a drain block the run; single replicas and
 #               unprotected workloads are listed (and block with `strict`)
 #   1/4         control plane                 — no pod moves
@@ -96,6 +98,12 @@ jobs:
           grep -E '^(REGION|CLUSTER|TARGET)=' /tmp/preflight >>"$GITHUB_ENV"
           eval "$(grep -E '^(REGION|CLUSTER)=' /tmp/preflight)"
           aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER"
+
+      # Before the control plane moves, because it cannot move back. Karpenter is
+      # the sharpest case: a controller that does not support the new API server
+      # stops provisioning, and the node phases below depend on it.
+      - name: Components support the target — Karpenter, Istio, cert-manager, Argo CD
+        run: ./scripts/eks-upgrade.sh compat "$ENVIRONMENT" "$TARGET" --live
 
       - name: Workload readiness — what a node roll will disrupt
         run: ./scripts/eks-upgrade.sh workloads ${STRICT:+"$STRICT"}

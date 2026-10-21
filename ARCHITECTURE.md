@@ -329,7 +329,7 @@ EKS cluster         →   eks-cluster-sg     →   the VPC
 | Prod approval | Reviewer approves before the job starts | plan → approve-with-plan → apply |
 | Teardown | Ordered, with sweeps | Exercise the sweeps' delete paths |
 | Upgrade readiness | `eks-upgrade` blocks only on PDBs that allow no disruption; single replicas and PDB-less workloads are warnings unless `strict` is set | `strict` on by default, once every workload carries replicas and a PDB |
-| Karpenter vs. Kubernetes version | Nothing checks that the Karpenter chart supports the target release before the control plane moves | Read Karpenter's compatibility matrix in the preflight, or bump the chart in `platform-gitops` first as a rule |
+| Components without a matrix | Gateway API, kube-prometheus-stack, Kiali and the AWS Load Balancer Controller publish no Kubernetes compatibility matrix; `eks-upgrade` reports them as unverified and relies on EKS upgrade insights for removed APIs. The controller is also pinned to chart 1.6.2 (2023) | Read their release notes per upgrade; bump the controller |
 
 ## 13. Upgrades
 
@@ -376,6 +376,31 @@ and taints — there is nothing to move back.
 no `version`, so it kept the one it was created with: a control-plane upgrade left the
 system nodes a minor behind with no diff in any plan. It now takes
 `kubernetes_version`, and `cluster_name` already makes it wait for the control plane.
+
+**Every component on top of EKS must support the target — checked before anything
+moves.** The six EKS add-ons are covered by `bump`, which only picks versions EKS lists
+as compatible. Helm-installed components are not, and their charts cannot say:
+`kubeVersion` is a floor where it exists at all, never a ceiling. So `compat` reads each
+project's own matrix, from the file its documentation is generated from:
+
+| Component | Source |
+|---|---|
+| Karpenter | `compatibility.yaml`, aws/karpenter-provider-aws |
+| Istio | `supportStatus.yml`, istio/istio.io |
+| cert-manager | supported-releases table, cert-manager/website |
+| Argo CD | `tested-kubernetes-versions.md`, argoproj/argo-cd, per release branch |
+
+Read at run time rather than copied, because a copy is one more version list to forget.
+It fails closed: an unreachable matrix, or a release the matrix no longer lists, blocks
+like an unsupported one. Components are discovered — every external source of every
+Application in the platform repository, every `helm_release` in the workload layer — so
+a new one is checked, or reported unverified, without a script change. On a live
+cluster every Application must also be `Synced`, or the declared versions say nothing
+about the running ones. Karpenter is the sharpest case: a controller that does not
+support the new API server stops provisioning, and the node phases depend on it.
+
+`eks-upgrade-pr` runs it before pushing a branch; `eks-upgrade` again before the
+control plane moves, since that is the step with no way back.
 
 **Transparency is a property of the workloads, not of the pipeline.** A drain evicts;
 whether that is visible depends on what was evicted. The preflight reads the cluster
