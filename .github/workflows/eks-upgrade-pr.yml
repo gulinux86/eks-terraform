@@ -52,13 +52,10 @@ jobs:
       - name: Rewrite the version pins
         run: ./scripts/eks-upgrade.sh bump "$TARGET"
 
-      # Advisory here; eks-upgrade.yml repeats it and blocks on errors. hml is
-      # destroyed between sessions, so a missing cluster is the common case.
+      # Advisory here: a missing cluster is a notice, and insight errors are shown
+      # without failing the job. eks-upgrade.yml repeats the check and blocks on them.
       - name: Upgrade insights for the live hml cluster
-        run: |
-          if ! ./scripts/eks-upgrade.sh preflight hml; then
-            echo "::notice::no insights — the hml cluster is not running, or reported errors above. eks-upgrade checks again before changing anything."
-          fi
+        run: ./scripts/eks-upgrade.sh preflight hml --advisory || true
 
       - name: Push the upgrade branch
         run: |
