@@ -14,6 +14,18 @@ variable "cluster_name" {
 
 }
 
+variable "kubernetes_version" {
+  type        = string
+  description = "Kubernetes minor version for the nodes (e.g. \"1.35\"). Pass the cluster's version: the group then rolls onto it whenever the control plane moves."
+
+  # Required, no default. A default here would be a second place the version lives,
+  # and the one nobody bumps.
+  validation {
+    condition     = can(regex("^1\\.\\d{2}$", var.kubernetes_version))
+    error_message = "kubernetes_version must be a minor version like \"1.35\" — no patch component, no \"v\" prefix."
+  }
+}
+
 variable "subnet_private_1a" {
   type        = string
   description = "Subnet ID from AZ 1a"

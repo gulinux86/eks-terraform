@@ -1,0 +1,154 @@
+name: eks-upgrade
+
+# Step 2 of an EKS upgrade: move one live cluster onto the version master declares,
+# one phase at a time, checking the cluster between phases. Run it for hml, verify,
+# then for prod — one cluster at a time. Step 1 is eks-upgrade-pr.yml.
+#
+#   preflight   one minor up, cluster ACTIVE, EKS upgrade insights clean
+#   workloads   PDBs that would hang a drain block the run; single replicas and
+#               unprotected workloads are listed (and block with `strict`)
+#   1/4         control plane                 — no pod moves
+#   2/4         system node group             — EKS rolls it: new node first, then
+#                                               cordon, drain against PDBs, terminate
+#   3/4         add-ons                       — after the nodes, as depends_on says
+#   4/4         Karpenter nodes               — Karpenter's drift replaces them,
+#                                               one at a time (NodePool budget)
+#   verify      every node on the new minor, every workload and Application healthy
+#
+# Nothing here runs `kubectl drain`: EKS and Karpenter already surge, cordon and drain
+# against PDBs, and a second drain would race them. This workflow orders, waits and
+# checks. There is no uncordon step either — EKS replaces nodes rather than upgrading
+# them in place, so the drained node is terminated, not returned. ARCHITECTURE.md §13.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Cluster to upgrade (hml first, then prod)"
+        required: true
+        type: choice
+        options: [hml, prod]
+      strict:
+        description: "Block on single-replica or PDB-less workloads, not only warn"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write # OIDC
+  # Granted because the security gate calls a reusable workflow that declares it; a
+  # caller must hold what its called workflows declare (ARCHITECTURE.md §9). The
+  # gate passes `upload-sarif: false`, so nothing writes to code scanning.
+  security-events: write
+
+jobs:
+  # The deploy's gates, called the same way: an upgrade applies master's code.
+  test:
+    uses: ./.github/workflows/_terraform-test.yml
+    with:
+      contract-script: ./scripts/check-layer-contract.sh
+
+  validate:
+    uses: ./.github/workflows/_terraform-validate.yml
+    with:
+      layers: '["foundation", "workload"]'
+
+  security:
+    uses: ./.github/workflows/_security-scan.yml
+    with:
+      upload-sarif: false
+
+  upgrade:
+    needs: [test, validate, security]
+    runs-on: ubuntu-latest
+    # The Environment gives the deploy role, and `prod` its required reviewer.
+    environment: ${{ inputs.environment }}
+    # Shared with terraform-deploy and terraform-destroy: never two writers on one
+    # environment, and never cancel one halfway through a node roll.
+    concurrency:
+      group: terraform-${{ inputs.environment }}
+      cancel-in-progress: false
+    # The longest phase is Karpenter's, one node at a time.
+    timeout-minutes: 240
+    env:
+      ENVIRONMENT: ${{ inputs.environment }}
+      STRICT: ${{ inputs.strict && '--strict' || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - name: Authenticate to AWS and install Terraform
+        uses: gulinux86/ci-templates/.github/actions/aws-terraform-setup@5532dca25b120e3cf5c2396b72b9fb5c5eb3d64c # ci-templates@master, 2026-10-17 (PR #1)
+        with:
+          role: deploy
+          terraform-version: "1.16.6"
+          deploy-role-arn: ${{ env.ENVIRONMENT == 'prod' && secrets.PROD_DEPLOY_ROLE_ARN || secrets.HML_DEPLOY_ROLE_ARN }}
+
+      - name: Terraform init
+        run: |
+          terraform -chdir=foundation init -input=false \
+            -backend-config="environments/${ENVIRONMENT}/backend.hcl"
+
+      - name: Preflight — version skew, cluster status, upgrade insights
+        run: |
+          set -euo pipefail
+          ./scripts/eks-upgrade.sh preflight "$ENVIRONMENT" | tee /tmp/preflight
+          grep -E '^(REGION|CLUSTER|TARGET)=' /tmp/preflight >>"$GITHUB_ENV"
+          eval "$(grep -E '^(REGION|CLUSTER)=' /tmp/preflight)"
+          aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER"
+
+      - name: Workload readiness — what a node roll will disrupt
+        run: ./scripts/eks-upgrade.sh workloads ${STRICT:+"$STRICT"}
+
+      - name: 1/4 Control plane
+        run: |
+          set -euo pipefail
+          ./scripts/eks-upgrade.sh apply "$ENVIRONMENT" module.eks_cluster
+          aws eks wait cluster-active --region "$REGION" --name "$CLUSTER"
+          VERSION=$(aws eks describe-cluster --region "$REGION" --name "$CLUSTER" --query cluster.version --output text)
+          [ "$VERSION" = "$TARGET" ] || { echo "::error::control plane reports $VERSION, expected $TARGET"; exit 1; }
+          echo "control plane on $VERSION"
+
+      # Terraform waits for EKS to finish the roll, and EKS fails it if a PDB keeps
+      # a pod from being evicted for 15 minutes — the preflight exists so that
+      # surfaces before the control plane moved, not here.
+      - name: 2/4 System node group
+        run: |
+          set -euo pipefail
+          ./scripts/eks-upgrade.sh apply "$ENVIRONMENT" module.eks_managed-node-group
+          ./scripts/eks-upgrade.sh nodes eks.amazonaws.com/nodegroup "$TARGET" 900
+
+      - name: 3/4 Add-ons
+        run: |
+          set -euo pipefail
+          ./scripts/eks-upgrade.sh apply "$ENVIRONMENT" module.eks_addons
+          NOT_ACTIVE=$(for A in $(aws eks list-addons --region "$REGION" --cluster-name "$CLUSTER" --query 'addons[]' --output text); do
+            S=$(aws eks describe-addon --region "$REGION" --cluster-name "$CLUSTER" --addon-name "$A" --query addon.status --output text)
+            [ "$S" = ACTIVE ] || echo "$A=$S"
+          done)
+          [ -z "$NOT_ACTIVE" ] || { echo "::error::add-ons not ACTIVE: $NOT_ACTIVE"; exit 1; }
+          echo "every add-on ACTIVE"
+
+      # Nothing to apply: the EC2NodeClass selects `al2023@latest`, which resolves
+      # against the control plane's version, so the upgrade has already made every
+      # Karpenter node drifted. Karpenter replaces them at the pace of the NodePool's
+      # disruption budget. This step waits for that, and skips if there are none.
+      - name: 4/4 Karpenter nodes
+        run: ./scripts/eks-upgrade.sh nodes karpenter.sh/nodepool "$TARGET" 3600
+
+      - name: Verify — nodes, workloads, Argo CD Applications
+        run: ./scripts/eks-upgrade.sh verify "$TARGET" 900
+
+      # Every phase was a -target. Anything else pending in foundation is reported,
+      # not applied — that is terraform-deploy's job, with its full plan on screen.
+      - name: Residual changes outside the upgrade
+        run: |
+          RC=0
+          terraform -chdir=foundation plan -input=false -detailed-exitcode \
+            -var-file="environments/${ENVIRONMENT}/terraform.tfvars" >/tmp/residual || RC=$?
+          case $RC in
+            0) echo "foundation fully converged" ;;
+            2) grep -E '^\s+# ' /tmp/residual || true
+               echo "::warning::foundation has changes outside the upgrade phases — review them with terraform-plan and apply with terraform-deploy" ;;
+            *) cat /tmp/residual; echo "::warning::the closing plan failed; the upgrade itself completed" ;;
+          esac

@@ -316,7 +316,7 @@ EKS cluster         →   eks-cluster-sg     →   the VPC
 | Cross-repo contract | `platform-gitops` hardcodes five names Terraform generates; nothing verifies they match | A check that reads `foundation/outputs.tf` and greps the manifests, the way `check-layer-contract.sh` does inside this repo |
 | Trivy's blind spot | The scan does not read tfvars, so `public_access_cidrs = ["0.0.0.0/0"]` and `endpoint_public_access = true` never produce a finding. Two `.trivyignore` entries therefore suppress nothing | Pass `--tf-vars` per environment, and expect both entries to start doing real work |
 | Scan threshold | The gate fails on HIGH/CRITICAL only. Six findings sit below it, unreviewed: no VPC flow logs, an unversioned bastion tooling bucket, log groups on the AWS-managed key, a security-group rule with no description | Decide each one rather than leaving the threshold to decide. Flow logs are the one with real forensic value |
-| Module test coverage | 5 of 12 modules have suites. `bastion` is the gap that matters — nothing stops `associate_public_ip_address = true` | A suite asserting no public IP, SSM-only access, and no ingress rules |
+| Module test coverage | 6 of 12 modules have suites. `bastion` is the gap that matters — nothing stops `associate_public_ip_address = true` | A suite asserting no public IP, SSM-only access, and no ingress rules |
 | Branch protection | None on `master`. Every pull-request check is advisory: they run, they report, and the merge button works regardless | Required status checks, and no direct push to `master`. Deliberate for a single-maintainer portfolio — the signal is there and the author reads it — and the first thing to turn on the moment anyone else can commit |
 | Observability | In-cluster Prometheus + Grafana + Kiali; retention in hours, no volume, so metrics do not survive a teardown | Amazon Managed Prometheus for retention, with Grafana — managed or in-cluster — reading from it. Worth doing when there is a series anyone would compare against yesterday |
 | Alerting | None. Alertmanager deliberately absent | A destination and an on-call story first; the component second |
@@ -328,3 +328,74 @@ EKS cluster         →   eks-cluster-sg     →   the VPC
 | Human cluster access | hml lists an IAM user and the account **root** | Per-session role, MFA, no standing cluster-admin |
 | Prod approval | Reviewer approves before the job starts | plan → approve-with-plan → apply |
 | Teardown | Ordered, with sweeps | Exercise the sweeps' delete paths |
+| Upgrade readiness | `eks-upgrade` blocks only on PDBs that allow no disruption; single replicas and PDB-less workloads are warnings unless `strict` is set | `strict` on by default, once every workload carries replicas and a PDB |
+| Karpenter vs. Kubernetes version | Nothing checks that the Karpenter chart supports the target release before the control plane moves | Read Karpenter's compatibility matrix in the preflight, or bump the chart in `platform-gitops` first as a rule |
+
+## 13. Upgrades
+
+**The version lives in Terraform and stays there.** `kubernetes_version` drives the
+control plane, the system node group and the add-on pins. Upgrading from outside —
+`aws eks update-cluster-version` — would leave tfvars a minor behind; the next plan
+would try to move the cluster back, EKS refuses downgrades, and every deploy would
+fail until someone edited the file. `ignore_changes = [version]` avoids that by
+removing the version from code, which is the larger problem.
+
+So the pipeline drives Terraform rather than going around it, in two workflows:
+
+| Workflow | Does | Writes to AWS |
+|---|---|---|
+| `eks-upgrade-pr` | Checks the step is one minor, resolves each add-on's EKS-default version for it, rewrites the seven values in hml **and** prod, pushes `upgrade/eks-<minor>` | No — plan role |
+| `eks-upgrade` | Upgrades one environment's live cluster in phases, checking between them | Yes — deploy role, Environment-gated |
+
+A person opens the pull request between the two: one opened with `GITHUB_TOKEN`
+triggers no workflows, and this change needs every check.
+
+**Phases, in the order the code already implies.** `module.eks_addons` declares
+`depends_on = [module.eks_managed-node-group]`, so a `-target` on the add-ons pulls in
+the nodes; the order is therefore control plane → system nodes → add-ons → Karpenter
+nodes. A plain `terraform-deploy` applies the same order in one pass; the upgrade
+workflow adds a saved, targeted plan per phase and a check after each one.
+
+| Phase | What moves pods | Checked after |
+|---|---|---|
+| Control plane | Nothing — EKS replaces API servers; pods keep running | Cluster `ACTIVE`, reports the target version |
+| System node group | EKS: a new node first, then cordon, drain against PDBs, terminate — `max_unavailable = 1` | Every node group node on the target and Ready |
+| Add-ons | Rolling updates of their own DaemonSets/Deployments | Every add-on `ACTIVE` |
+| Karpenter nodes | Karpenter's drift: `al2023@latest` resolves against the control plane's version, so every node is drifted at once and replaced at the NodePool budget (`nodes: "1"`) | Every `karpenter.sh/nodepool` node on the target and Ready |
+
+Then every Deployment, StatefulSet and Argo CD Application must be healthy, and a
+closing full plan reports — never applies — anything else pending.
+
+**No `kubectl drain`, and no uncordon.** Both node owners already surge, cordon and
+drain against PDBs; a drain from the pipeline would race them. And EKS replaces
+nodes rather than upgrading them in place, so a drained node is terminated, not
+returned to service. Pods land on the replacement because it carries the same labels
+and taints — there is nothing to move back.
+
+**The node group had to learn the cluster's version.** `aws_eks_node_group` carried
+no `version`, so it kept the one it was created with: a control-plane upgrade left the
+system nodes a minor behind with no diff in any plan. It now takes
+`kubernetes_version`, and `cluster_name` already makes it wait for the control plane.
+
+**Transparency is a property of the workloads, not of the pipeline.** A drain evicts;
+whether that is visible depends on what was evicted. The preflight reads the cluster
+before anything moves:
+
+- **Blocks:** a PDB allowing zero disruptions. EKS abandons a node group update after
+  15 minutes of failed evictions; Karpenter waits indefinitely. Either way it is better
+  found before the control plane moved.
+- **Warns** (blocks with `strict`): a single replica — down from eviction until its
+  replacement is Ready — and several replicas with no PDB, which one drain may evict
+  together. Also pods annotated `karpenter.sh/do-not-disrupt`, which hold their node.
+
+What makes a workload pass: 2+ replicas, a PDB (`minAvailable: 1` or
+`maxUnavailable: 1`), a readiness probe, `topologySpreadConstraints` across nodes, and
+a `preStop` delay long enough for the ALB to deregister the target.
+
+**One cluster at a time.** hml first, verified end to end; then prod through its
+Environment's reviewer. Nothing enforces the order across accounts — prod's deploy
+role cannot see hml — so it is a procedure, written in the workflow's summary.
+
+**Resuming.** Each phase plans with `-detailed-exitcode` and skips when there is
+nothing to do, and the preflight accepts a cluster already on the target. A run that
+stopped partway is resumed by running it again.
