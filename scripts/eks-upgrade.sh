@@ -5,6 +5,7 @@
 #
 #   bump <minor>                  rewrite the version + six add-on pins in hml and prod
 #   preflight <env> [--advisory]  version skew, cluster status, EKS upgrade insights
+#   compat <env> <minor> [--live]  every Helm-installed component supports <minor>
 #   workloads [--strict]          PDBs that would block a drain; workloads that would blink
 #   apply <env> <target>          plan -target -out, apply the saved plan if it has changes
 #   nodes <selector> <minor> <s>  wait until every matching node runs <minor> and is Ready
@@ -199,6 +200,188 @@ cmd_preflight() {
   echo "TARGET=$TARGET"
 }
 
+# --- compat -------------------------------------------------------------------
+# Does every component installed on top of EKS support the target minor?
+#
+# The six EKS add-ons need no check here: `bump` only picks versions EKS lists as
+# compatible. Everything Helm installs is different — Argo CD Applications in the
+# platform repository, and helm_release resources in the workload layer — and its
+# own Chart.yaml does not answer the question: `kubeVersion` is a floor where it is
+# set at all (cert-manager ">= 1.22", Istio and Karpenter nothing), never a ceiling.
+#
+# So each project's own compatibility matrix is read, at run time, from the file its
+# documentation is generated from. A copy here would be one more version list to
+# forget. Every read fails closed: an unreachable matrix blocks, as does a version
+# the matrix does not list (cert-manager drops releases once they are out of support).
+#
+#   Karpenter      compatibility.yaml             aws/karpenter-provider-aws
+#   Istio          supportStatus.yml              istio/istio.io
+#   cert-manager   supported-releases table       cert-manager/website
+#   Argo CD        tested-kubernetes-versions.md  argoproj/argo-cd, per release branch
+#
+# Anything else is reported as unverified, not passed: no published matrix means
+# nobody has said. EKS upgrade insights (preflight) still catch the failure that
+# matters most for those — an API removed in the target release that they use.
+#
+# Components are discovered, not listed: a new Application or helm_release is
+# checked, or reported unverified, without editing this script.
+KARPENTER_MATRIX=https://raw.githubusercontent.com/aws/karpenter-provider-aws/main/hack/docs/compatibilitymatrix_gen/compatibility.yaml
+ISTIO_MATRIX=https://raw.githubusercontent.com/istio/istio.io/master/data/compatibility/supportStatus.yml
+CERT_MANAGER_MATRIX=https://raw.githubusercontent.com/cert-manager/website/master/content/docs/releases/README.md
+
+fetch() { curl -sSfL --retry 3 --max-time 30 "$1"; }
+mm() { local v=${1#v}; cut -d. -f1,2 <<<"$v"; } # v1.21.1 -> 1.21
+
+# "repoURL|chart|targetRevision" per external source of every Application under $1.
+# Sources pointing back at the platform repository itself are its own manifests.
+app_sources() {
+  local SELF=$2
+  # shellcheck disable=SC2016 # $NF and $2 are awk's fields, not shell expansions
+  find "$1" -name '*.yaml' -print0 | xargs -0 -r awk -v self="$SELF" '
+    function emit() { if (url != "" && url != self) print url "|" chart "|" rev; url = chart = rev = "" }
+    FNR == 1 { emit() }
+    /^[[:space:]]*-?[[:space:]]*repoURL:/ { emit(); url = $NF }
+    /^[[:space:]]*chart:/ { chart = $2 }
+    /^[[:space:]]*targetRevision:/ { rev = $2 }
+    END { emit() }' | tr -d '"'"'" | sort -u
+}
+
+# "repository|chart|version" per helm_release in the workload layer that pulls from
+# a repository (local charts have none). A version given as var.X is followed the
+# way Terraform would: the module block in workload/main.tf whose source is that
+# directory passes X = var.Y, and Y is set in the environment's tfvars.
+tf_releases() {
+  local ENV=$1 F MOD REPO CHART VER ROOT
+  for F in workload/modules/*/*.tf; do
+    MOD=$(basename "$(dirname "$F")")
+    awk '/resource "helm_release"/ { r = 1; repo = chart = ver = "" }
+         r && /^[[:space:]]*repository[[:space:]]*=/ { repo = $3 }
+         r && /^[[:space:]]*chart[[:space:]]*=/ { chart = $3 }
+         r && /^[[:space:]]*version[[:space:]]*=/ { ver = $3 }
+         r && /^}/ { if (repo != "") print repo "|" chart "|" ver; r = 0 }' "$F" \
+      | tr -d '"' | while IFS='|' read -r REPO CHART VER; do
+        if [[ $VER == var.* ]]; then
+          ROOT=$(awk -v src="./modules/$MOD" -v arg="${VER#var.}" '
+            /^module "/ { m = 0 }
+            $1 == "source" && $3 == "\"" src "\"" { m = 1 }
+            m && $1 == arg && $3 ~ /^var\./ { sub(/^var\./, "", $3); print $3; exit }' workload/main.tf)
+          VER=$([ -n "$ROOT" ] && tfvar "workload/environments/$ENV/terraform.tfvars" "$ROOT")
+        fi
+        echo "$REPO|$CHART|${VER:-unresolved}"
+      done
+  done
+}
+
+# Each check prints "ok <detail>", "no <detail>", or "unknown <detail>".
+check_karpenter() {
+  local MATRIX RANGE MIN MAX
+  MATRIX=$(fetch "$KARPENTER_MATRIX") || { echo "unknown matrix unreachable"; return; }
+  RANGE=$(awk -v app="$(mm "$1").x" '
+    { gsub(/"/, "") }
+    $2 == "appVersion:" { a = $3 } $1 == "appVersion:" { a = $2 }
+    $1 == "minK8sVersion:" { mn = $2 }
+    $1 == "maxK8sVersion:" { mx = $2; if (a == app) r = mn " " mx }
+    END { print r }' <<<"$MATRIX")
+  [ -n "$RANGE" ] || { echo "unknown $(mm "$1").x is not in the matrix"; return; }
+  read -r MIN MAX <<<"$RANGE"
+  in_range "$2" "$MIN" "$MAX" && echo "ok supports $MIN–$MAX" || echo "no supports $MIN–$MAX"
+}
+
+check_istio() {
+  local MATRIX LIST
+  MATRIX=$(fetch "$ISTIO_MATRIX") || { echo "unknown matrix unreachable"; return; }
+  LIST=$(awk -v v="\"$(mm "$1")\"" '$2 == "version:" { f = ($3 == v) } f && $1 == "k8sVersions:" { $1 = ""; print; exit }' <<<"$MATRIX" | tr -d ' "[]')
+  [ -n "$LIST" ] || { echo "unknown $(mm "$1") is not in the matrix"; return; }
+  grep -qx "$2" <<<"${LIST//,/$'\n'}" && echo "ok supports ${LIST//,/, }" || echo "no supports ${LIST//,/, }"
+}
+
+check_cert_manager() {
+  local MATRIX COL MIN MAX
+  MATRIX=$(fetch "$CERT_MANAGER_MATRIX") || { echo "unknown matrix unreachable"; return; }
+  # | [1.21][] | Jul 08, 2026 | Release of 1.23 | 1.33 → 1.36 / 4.20 → 4.22 | ...
+  COL=$(awk -F'|' -v r="[$(mm "$1")][]" '{ gsub(/ /, "", $2) } $2 == r { print $5; exit }' <<<"$MATRIX")
+  read -r MIN _ MAX _ <<<"${COL%%/*}"
+  [ -n "$MAX" ] || { echo "unknown $(mm "$1") is not a supported release"; return; }
+  in_range "$2" "$MIN" "$MAX" && echo "ok supports $MIN–$MAX" || echo "no supports $MIN–$MAX"
+}
+
+check_argocd() {
+  # The chart's version is not Argo CD's; the matrix is keyed by the latter.
+  local APP LINE
+  APP=$(fetch "https://raw.githubusercontent.com/argoproj/argo-helm/argo-cd-$1/charts/argo-cd/Chart.yaml" \
+    | sed -nE 's/^appVersion:[[:space:]]*"?([^"]+)"?.*/\1/p') || true
+  [ -n "$APP" ] || { echo "unknown could not read the chart's appVersion"; return; }
+  LINE=$(fetch "https://raw.githubusercontent.com/argoproj/argo-cd/release-$(mm "$APP")/docs/operator-manual/tested-kubernetes-versions.md" \
+    | grep -E "^\| *$(mm "$APP") *\|") || true
+  [ -n "$LINE" ] || { echo "unknown Argo CD $(mm "$APP") is not in the matrix"; return; }
+  local TESTED
+  TESTED=$(cut -d'|' -f3 <<<"$LINE" | xargs)
+  grep -q "v$2\b" <<<"$TESTED" && echo "ok Argo CD $APP tested on $TESTED" || echo "no Argo CD $APP tested on $TESTED"
+}
+
+in_range() { [ "$(minor "$1")" -ge "$(minor "$2")" ] && [ "$(minor "$1")" -le "$(minor "$3")" ]; }
+
+cmd_compat() {
+  local ENV=${1:?usage: compat <env> <minor> [--live]} TARGET=${2:?usage: compat <env> <minor> [--live]} LIVE=${3:-}
+
+  # With a live cluster, what runs must be what is declared — otherwise checking
+  # the declared versions says nothing about the running ones.
+  if [ "$LIVE" = --live ] && kubectl get crd applications.argoproj.io >/dev/null 2>&1; then
+    local DRIFT
+    DRIFT=$(kubectl get applications -A -o json | jq -r '.items[]
+      | select(.status.sync.status != "Synced" or .status.health.status != "Healthy")
+      | "\(.metadata.name) \(.status.sync.status)/\(.status.health.status)"')
+    [ -z "$DRIFT" ] || die "Applications not Synced/Healthy, so the running versions are not the declared ones: $(tr '\n' ' ' <<<"$DRIFT")"
+  fi
+
+  local WTF REPO REV DIR
+  WTF=workload/environments/$ENV/terraform.tfvars
+  REPO=$(tfvar "$WTF" platform_repo_url)
+  REV=$(tfvar "$WTF" platform_repo_revision)
+  DIR=$(mktemp -d)
+  git clone -q --depth 1 --branch "$REV" "$REPO" "$DIR" 2>/dev/null \
+    || die "could not clone $REPO at $REV to read the declared component versions"
+
+  local COMPONENTS
+  COMPONENTS=$({ app_sources "$DIR" "$REPO" | sed 's/^/argo|/'; tf_releases "$ENV" | sed 's/^/terraform|/'; })
+  rm -rf "$DIR"
+
+  summary "### Components on Kubernetes $TARGET"
+  summary ""
+  summary "| Component | Version | Installed by | Result |"
+  summary "|---|---|---|---|"
+
+  local BY URL CHART VER NAME R STATUS DETAIL BAD=0 UNVERIFIED=() SEEN_ISTIO=""
+  while IFS='|' read -r BY URL CHART VER; do
+    NAME=${CHART:-$(basename "$URL")}
+    case "$URL|$NAME" in
+      *karpenter*) R=$(check_karpenter "$VER" "$TARGET") ;;
+      *istio-release*)
+        # base, istiod, cni and ztunnel are one Istio release; check it once.
+        [ "$SEEN_ISTIO" = "$VER" ] && continue
+        SEEN_ISTIO=$VER NAME="istio (base, istiod, cni, ztunnel)"
+        R=$(check_istio "$VER" "$TARGET") ;;
+      *\|cert-manager) R=$(check_cert_manager "$VER" "$TARGET") ;;
+      *\|argo-cd) R=$(check_argocd "$VER" "$TARGET") ;;
+      *) R="unverified no published Kubernetes compatibility matrix" ;;
+    esac
+    STATUS=${R%% *} DETAIL=${R#* }
+    case "$STATUS" in
+      ok) echo "ok          $NAME $VER — $DETAIL"; summary "| $NAME | \`$VER\` | $BY | ✅ $DETAIL |" ;;
+      unverified) echo "unverified  $NAME $VER"; summary "| $NAME | \`$VER\` | $BY | ⚠️ $DETAIL |"; UNVERIFIED+=("$NAME $VER") ;;
+      no) echo "::error::$NAME $VER does not support Kubernetes $TARGET — $DETAIL"
+          summary "| $NAME | \`$VER\` | $BY | ❌ $DETAIL |"; BAD=1 ;;
+      *) echo "::error::cannot verify $NAME $VER against Kubernetes $TARGET — $DETAIL"
+         summary "| $NAME | \`$VER\` | $BY | ❌ could not verify: $DETAIL |"; BAD=1 ;;
+    esac
+  done <<<"$COMPONENTS"
+
+  if [ ${#UNVERIFIED[@]} -gt 0 ]; then
+    warn "no published Kubernetes matrix, check release notes by hand: ${UNVERIFIED[*]}"
+  fi
+  [ "$BAD" -eq 0 ] || die "resolve the components above first — upgrade what does not support $TARGET (platform repository or workload layer) and let it roll out; a component that could not be verified blocks too, then rerun"
+}
+
 # --- workloads ----------------------------------------------------------------
 # What a node roll will do to what runs on the cluster. Read-only.
 #
@@ -367,9 +550,10 @@ shift || true
 case "$CMD" in
   bump) cmd_bump "$@" ;;
   preflight) cmd_preflight "$@" ;;
+  compat) cmd_compat "$@" ;;
   workloads) cmd_workloads "$@" ;;
   apply) cmd_apply "$@" ;;
   nodes) cmd_nodes "$@" ;;
   verify) cmd_verify "$@" ;;
-  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

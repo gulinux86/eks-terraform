@@ -118,8 +118,8 @@ renders an empty topology that looks like a mesh problem.
 | `terraform-docs` | PR, dispatch | Fails when a README between the `BEGIN_TF_DOCS` markers is out of date |
 | `terraform-deploy` | dispatch (env + layer) | Gated on tests, validate and Trivy, then `plan -out` → `apply tfplan` |
 | `terraform-destroy` | dispatch (env + layer + typed confirm) | Ordered teardown (§11) |
-| `eks-upgrade-pr` | dispatch (target minor) | Bumps the Kubernetes version and the six add-on pins in hml and prod; pushes a branch to open a PR from (§13) |
-| `eks-upgrade` | dispatch (env) | Upgrades a live cluster: preflight, control plane, system nodes, add-ons, Karpenter nodes, verify (§13) |
+| `eks-upgrade-pr` | dispatch (target minor) | Bumps the Kubernetes version and the six add-on pins in hml and prod, checks Karpenter, Istio, cert-manager and Argo CD support it; pushes a branch to open a PR from (§13) |
+| `eks-upgrade` | dispatch (env) | Upgrades a live cluster: preflight, component compatibility, control plane, system nodes, add-ons, Karpenter nodes, verify (§13) |
 
 Files prefixed `_` are reusable (`on: workflow_call`) and are not dispatched directly.
 The deploy's gates call the same workflows the pull-request checks call, so a gate
