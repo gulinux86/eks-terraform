@@ -66,6 +66,16 @@ resource "aws_eks_node_group" "eks_managed_node_group" {
   node_role_arn   = aws_iam_role.eks_managed_role.arn
   instance_types  = var.instance_types
   ami_type        = var.ami_type
+
+  # Without this the group keeps the version it was created with. A control-plane
+  # upgrade then left the nodes one minor behind with no diff in any plan: EKS does
+  # not move a node group on its own, and Terraform had nothing to compare.
+  #
+  # Changing it makes EKS roll the group — new node first, then cordon, drain
+  # (honouring PodDisruptionBudgets) and terminate the old one, max_unavailable at a
+  # time. Ordering is safe in a single apply: cluster_name already makes this wait
+  # for the control-plane update. See ARCHITECTURE.md §13.
+  version = var.kubernetes_version
   subnet_ids = [
     var.subnet_private_1a,
     var.subnet_private_1b

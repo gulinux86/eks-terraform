@@ -118,6 +118,8 @@ renders an empty topology that looks like a mesh problem.
 | `terraform-docs` | PR, dispatch | Fails when a README between the `BEGIN_TF_DOCS` markers is out of date |
 | `terraform-deploy` | dispatch (env + layer) | Gated on tests, validate and Trivy, then `plan -out` → `apply tfplan` |
 | `terraform-destroy` | dispatch (env + layer + typed confirm) | Ordered teardown (§11) |
+| `eks-upgrade-pr` | dispatch (target minor) | Bumps the Kubernetes version and the six add-on pins in hml and prod; pushes a branch to open a PR from (§13) |
+| `eks-upgrade` | dispatch (env) | Upgrades a live cluster: preflight, control plane, system nodes, add-ons, Karpenter nodes, verify (§13) |
 
 Files prefixed `_` are reusable (`on: workflow_call`) and are not dispatched directly.
 The deploy's gates call the same workflows the pull-request checks call, so a gate
@@ -127,11 +129,12 @@ cannot drift from the check it mirrors. AWS auth comes from a composite action i
 **Adding a test suite needs no workflow edit** — the module list is derived from
 whichever directories contain `tests/`.
 
-Five of twelve modules have suites: `network`, `cluster`, `eks-addons`, `karpenter`,
-`platform-ingress` — 12 run blocks, 51 assertions, all with mocked providers. They
-assert security invariants, not resource counts: that public subnets carry no
-`role/elb` tag, that the ingress load balancer is `internal`, that Karpenter can only
-terminate what carries both of its tags. `bastion` is the gap that matters (§12).
+Six of twelve modules have suites: `network`, `cluster`, `eks-addons`, `karpenter`,
+`managed-node-group`, `platform-ingress` — 15 run blocks, 54 assertions, all with
+mocked providers. They assert security invariants, not resource counts: that public
+subnets carry no `role/elb` tag, that the ingress load balancer is `internal`, that
+Karpenter can only terminate what carries both of its tags, that the system nodes
+follow the cluster's version. `bastion` is the gap that matters (§12).
 
 Deploys are never automatic on merge. `master` is the single deploy source;
 pull-request plans always resolve to `hml`.
@@ -158,8 +161,8 @@ foundation/    main.tf outputs.tf variables.tf backend.tf provider.tf
 workload/      same shape
                modules/{aws-load-balancer-controller,platform-ingress,
                         storage,argocd,argocd-bootstrap}/
-scripts/       check-layer-contract.sh
-.github/       plan · test · security-scan · docs · deploy · destroy
+scripts/       check-layer-contract.sh · eks-upgrade.sh
+.github/       plan · test · security-scan · docs · deploy · destroy · eks-upgrade
 .trivyignore   accepted exceptions — each needs a written reason
 ```
 
