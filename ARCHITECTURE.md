@@ -344,11 +344,17 @@ So the pipeline drives Terraform rather than going around it, in two workflows:
 
 | Workflow | Does | Writes to AWS |
 |---|---|---|
-| `eks-upgrade-pr` | Checks the step is one minor, resolves each add-on's EKS-default version for it — never below the current pin, since EKS does not downgrade add-ons — rewrites the seven values in hml **and** prod, pushes `upgrade/eks-<minor>` | No — plan role |
+| `eks-upgrade-pr` | Checks the step is one minor, resolves each add-on's EKS-default version for it — never below the current pin, since EKS does not downgrade add-ons — rewrites the seven values in hml **and** prod, pushes `upgrade/eks-<minor>` and opens it as a draft pull request | No — plan role |
 | `eks-upgrade` | Upgrades one environment's live cluster in phases, checking between them | Yes — deploy role, Environment-gated |
 
-A person opens the pull request between the two: one opened with `GITHUB_TOKEN`
-triggers no workflows, and this change needs every check.
+A person starts the checks between the two. A pull request opened with
+`GITHUB_TOKEN` triggers no workflows, so `eks-upgrade-pr` opens it as a **draft**
+and the pull-request workflows also listen for `ready_for_review`: marking it ready
+is the person's event, and it runs every check. A token that does trigger workflows —
+a PAT or a GitHub App — would remove the click at the cost of a write credential
+stored in the repository. Opening the pull request needs the repository setting
+"Allow GitHub Actions to create and approve pull requests"; without it the workflow
+falls back to a compare link in its summary.
 
 **Phases, in the order the code already implies.** `module.eks_addons` declares
 `depends_on = [module.eks_managed-node-group]`, so a `-target` on the add-ons pulls in
