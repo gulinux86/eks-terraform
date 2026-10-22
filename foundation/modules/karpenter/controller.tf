@@ -61,6 +61,12 @@ data "aws_iam_policy_document" "controller" {
       "ec2:DescribeSubnets",
       "ec2:DescribeSpotPriceHistory",
       "ec2:DescribeAvailabilityZones",
+      # Added to Karpenter's reference policy by 1.13; without DescribeInstanceStatus
+      # the controller logs UnauthorizedOperation at startup and runs without
+      # instance-status health checks.
+      "ec2:DescribeInstanceStatus",
+      "ec2:DescribeCapacityReservations",
+      "ec2:DescribePlacementGroups",
     ]
   }
 

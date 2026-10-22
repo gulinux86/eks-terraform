@@ -12,7 +12,7 @@ Design decisions and their trade-offs are in **`ARCHITECTURE.md`**. Read the rel
 section before changing a security-shaped default.
 
 ```
-bootstrap/   state bucket (KMS) + GitHub OIDC roles       run once per account
+bootstrap/   state bucket (KMS) + OIDC roles + Spot SLR   run once per account
 foundation/  VPC · EKS · KMS · system nodes · bastion    ─┐
              VPC endpoints · core add-ons · Karpenter IAM │ terraform_remote_state
 workload/    ALB controller · ingress ALB · storage      ←┘
@@ -32,7 +32,7 @@ workload/    ALB controller · ingress ALB · storage      ←┘
 
 | Layer | Owns | State |
 |---|---|---|
-| `bootstrap` | State bucket, OIDC roles | local, not committed |
+| `bootstrap` | State bucket, OIDC roles, EC2 Spot service-linked role | local, not committed |
 | `foundation` | VPC, EKS, KMS, system node group, bastion, endpoints, core add-ons, Karpenter's AWS prerequisites | `foundation/<env>/terraform.tfstate` |
 | `workload` | ALB controller, ingress ALB, StorageClass, Argo CD, the handover | `workload/<env>/terraform.tfstate` |
 
@@ -153,7 +153,7 @@ Secrets per account: `<ENV>_PLAN_ROLE_ARN`, `<ENV>_DEPLOY_ROLE_ARN`.
 ## Layout
 
 ```
-bootstrap/     state bucket + OIDC roles
+bootstrap/     state bucket + OIDC roles + Spot service-linked role
 foundation/    main.tf outputs.tf variables.tf backend.tf provider.tf
                environments/{hml,prod}/{terraform.tfvars,backend.hcl}
                modules/{network,cluster,managed-node-group,bastion,
