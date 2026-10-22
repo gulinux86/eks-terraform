@@ -23,13 +23,13 @@ cidr_block   = "10.1.0.0/16" # distinct from hml's 10.0/16, so the two can never
 #
 # Production should lag hml deliberately: a version proves itself there first.
 # Today both track 1.35 because hml is the only environment that exists.
-kubernetes_version = "1.35"
+kubernetes_version = "1.36"
 
 vpc_cni_version            = "v1.22.4-eksbuild.3"
-coredns_version            = "v1.13.2-eksbuild.11"
-kube_proxy_version         = "v1.35.3-eksbuild.18"
-metrics_server_version     = "v0.9.0-eksbuild.6"
-ebs_csi_version            = "v1.64.0-eksbuild.1"
+coredns_version            = "v1.14.7-eksbuild.11"
+kube_proxy_version         = "v1.36.0-eksbuild.48"
+metrics_server_version     = "v0.9.0-eksbuild.13"
+ebs_csi_version            = "v1.67.1-eksbuild.1"
 pod_identity_agent_version = "v1.4.0-eksbuild.1"
 
 # --- Compute ------------------------------------------------------------------
