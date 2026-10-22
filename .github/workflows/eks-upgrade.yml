@@ -150,13 +150,16 @@ jobs:
       # Every phase was a -target. Anything else pending in foundation is reported,
       # not applied — that is terraform-deploy's job, with its full plan on screen.
       - name: Residual changes outside the upgrade
+        # Read from the plan's text, not -detailed-exitcode: setup-terraform's wrapper
+        # turns exit 2 into 0 (see cmd_apply in scripts/eks-upgrade.sh).
         run: |
-          RC=0
-          terraform -chdir=foundation plan -input=false -detailed-exitcode \
-            -var-file="environments/${ENVIRONMENT}/terraform.tfvars" >/tmp/residual || RC=$?
-          case $RC in
-            0) echo "foundation fully converged" ;;
-            2) grep -E '^\s+# ' /tmp/residual || true
-               echo "::warning::foundation has changes outside the upgrade phases — review them with terraform-plan and apply with terraform-deploy" ;;
-            *) cat /tmp/residual; echo "::warning::the closing plan failed; the upgrade itself completed" ;;
-          esac
+          if ! terraform -chdir=foundation plan -input=false -no-color \
+              -var-file="environments/${ENVIRONMENT}/terraform.tfvars" >/tmp/residual 2>&1; then
+            cat /tmp/residual
+            echo "::warning::the closing plan failed; the upgrade itself completed"
+          elif grep -q '^No changes\.' /tmp/residual; then
+            echo "foundation fully converged"
+          else
+            grep -E '^\s+# ' /tmp/residual || true
+            echo "::warning::foundation has changes outside the upgrade phases — review them with terraform-plan and apply with terraform-deploy"
+          fi
