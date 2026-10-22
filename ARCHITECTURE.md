@@ -126,6 +126,16 @@ hands the cluster to Argo CD.
 - **AWS Load Balancer Controller (IRSA + Helm).** It now only registers pod IPs and
   writes the security-group rules that reach them; it no longer creates load
   balancers (§3). Its policy is wider than that job (§12).
+  - **Chart and policy move together.** `iam_policy.json` is the policy AWS publishes
+    for the pinned release, copied verbatim; a chart bump without it fails at runtime
+    with `AccessDenied`, not at plan.
+  - **Its own Gateway API controllers are off.** Istio implements the Gateway API
+    here. v3 enables the controller's ALB/NLB Gateway support by default and disables
+    it only when the Gateway API CRDs are missing at startup — missing at this layer's
+    apply, present after Argo CD syncs — so the feature gates are pinned to `false`
+    to keep one behaviour across restarts.
+  - **CRDs are installed, never upgraded, by Helm.** Fresh clusters get the chart's
+    CRDs; a chart bump on a live cluster needs the release notes' CRD step first.
 - **The `TargetGroupBinding` is applied by Terraform**, not Argo CD — its ARN and
   security-group id are account-specific and the GitOps repository is public.
 - **A default `gp3` StorageClass.** Without one the CSI driver provisions nothing, and
@@ -329,7 +339,7 @@ EKS cluster         →   eks-cluster-sg     →   the VPC
 | Prod approval | Reviewer approves before the job starts | plan → approve-with-plan → apply |
 | Teardown | Ordered, with sweeps | Exercise the sweeps' delete paths |
 | Upgrade readiness | `eks-upgrade` blocks only on PDBs that allow no disruption; single replicas and PDB-less workloads are warnings unless `strict` is set | `strict` on by default, once every workload carries replicas and a PDB |
-| Components without a matrix | Gateway API, kube-prometheus-stack, Kiali and the AWS Load Balancer Controller publish no Kubernetes compatibility matrix; `eks-upgrade` reports them as unverified and relies on EKS upgrade insights for removed APIs. The controller is also pinned to chart 1.6.2 (2023) | Read their release notes per upgrade; bump the controller |
+| Components without a matrix | Gateway API, kube-prometheus-stack, Kiali and the AWS Load Balancer Controller publish no Kubernetes compatibility matrix; `eks-upgrade` reports them as unverified and relies on EKS upgrade insights for removed APIs | Read their release notes per upgrade |
 
 ## 13. Upgrades
 
