@@ -410,7 +410,9 @@ Read at run time rather than copied, because a copy is one more version list to 
 It fails closed: an unreachable matrix, or a release the matrix no longer lists, blocks
 like an unsupported one. Components are discovered — every external source of every
 Application in the platform repository, every `helm_release` in the workload layer — so
-a new one is checked, or reported unverified, without a script change. On a live
+a new one is checked, or reported unverified, without a script change. Applications
+sourced from the apps repository (`apps_repo_url`) are skipped: they are workloads,
+which the `workloads` step judges by replicas and PDBs instead. On a live
 cluster every Application must also be `Synced`, or the declared versions say nothing
 about the running ones. Karpenter is the sharpest case: a controller that does not
 support the new API server stops provisioning, and the node phases depend on it.
