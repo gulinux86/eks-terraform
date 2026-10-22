@@ -334,16 +334,19 @@ cmd_compat() {
     [ -z "$DRIFT" ] || die "Applications not Synced/Healthy, so the running versions are not the declared ones: $(tr '\n' ' ' <<<"$DRIFT")"
   fi
 
-  local WTF REPO REV DIR
+  local WTF REPO REV DIR APPS
   WTF=workload/environments/$ENV/terraform.tfvars
   REPO=$(tfvar "$WTF" platform_repo_url)
   REV=$(tfvar "$WTF" platform_repo_revision)
+  APPS=$(tfvar "$WTF" apps_repo_url)
   DIR=$(mktemp -d)
   git clone -q --depth 1 --branch "$REV" "$REPO" "$DIR" 2>/dev/null \
     || die "could not clone $REPO at $REV to read the declared component versions"
 
   local COMPONENTS
-  COMPONENTS=$({ app_sources "$DIR" "$REPO" | sed 's/^/argo|/'; tf_releases "$ENV" | sed 's/^/terraform|/'; })
+  # Applications pointing at the apps repository are workloads, not components:
+  # they publish no matrix to check, and the `workloads` step covers them.
+  COMPONENTS=$({ app_sources "$DIR" "$REPO" | awk -F'|' -v apps="$APPS" '$1 != apps' | sed 's/^/argo|/'; tf_releases "$ENV" | sed 's/^/terraform|/'; })
   rm -rf "$DIR"
 
   summary "### Components on Kubernetes $TARGET"
