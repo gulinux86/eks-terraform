@@ -427,6 +427,9 @@ a `preStop` delay long enough for the ALB to deregister the target.
 Environment's reviewer. Nothing enforces the order across accounts — prod's deploy
 role cannot see hml — so it is a procedure, written in the workflow's summary.
 
-**Resuming.** Each phase plans with `-detailed-exitcode` and skips when there is
+**Resuming.** Each phase applies a saved plan, which is a no-op when there is
 nothing to do, and the preflight accepts a cluster already on the target. A run that
-stopped partway is resumed by running it again.
+stopped partway is resumed by running it again. The phases deliberately do not
+branch on `-detailed-exitcode`: in CI `terraform` is setup-terraform's wrapper, which
+reports exit 2 ("changes") as 0, and the first hml upgrade skipped its control-plane
+phase that way — stopped by the version check right after it, before any node moved.

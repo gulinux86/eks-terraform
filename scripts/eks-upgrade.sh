@@ -461,19 +461,17 @@ cmd_workloads() {
 }
 
 # --- apply --------------------------------------------------------------------
-# One phase = one targeted, saved plan. -detailed-exitcode tells "nothing to do"
-# (0) from "changes" (2), so a resumed run skips phases already done instead of
-# applying an empty plan.
+# One phase = one targeted, saved plan, applied as planned. Not -detailed-exitcode:
+# in CI `terraform` is hashicorp/setup-terraform's wrapper, which reports exit 2
+# ("changes") as 0 — the first hml upgrade printed "no changes" under a plan moving
+# 1.35 -> 1.36 and applied nothing. An empty saved plan applies as a no-op, so a
+# resumed run still passes through phases already done.
 cmd_apply() {
   local ENV=${1:?usage: apply <env> <target address>} TARGET=${2:?usage: apply <env> <target address>}
-  local RC=0
-  terraform -chdir=foundation plan -input=false -detailed-exitcode -out=tfplan \
-    -target="$TARGET" -var-file="environments/$ENV/terraform.tfvars" || RC=$?
-  case $RC in
-    0) echo "$TARGET: no changes" ;;
-    2) terraform -chdir=foundation apply -input=false -auto-approve tfplan ;;
-    *) die "plan for $TARGET failed" ;;
-  esac
+  terraform -chdir=foundation plan -input=false -out=tfplan \
+    -target="$TARGET" -var-file="environments/$ENV/terraform.tfvars" ||
+    die "plan for $TARGET failed"
+  terraform -chdir=foundation apply -input=false -auto-approve tfplan
 }
 
 # --- nodes --------------------------------------------------------------------
