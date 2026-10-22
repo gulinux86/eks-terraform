@@ -19,7 +19,7 @@ comments (`see ARCHITECTURE.md §N`) and are stable.
 │                             └ VPC endpoints + S3 gateway │
 └──────────────────────────────────────────────────────────┘
 
-bootstrap → state bucket + OIDC roles          local state
+bootstrap → state bucket + OIDC roles + Spot SLR  local state
 foundation → network, cluster, nodes, bastion  ─┐ remote_state
 workload   → add-ons, ingress ALB, Argo CD     ←┘
                     └─ handover ─▶ platform-gitops
