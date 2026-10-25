@@ -9,13 +9,23 @@ name: eks-upgrade
 #               own matrices; Applications Synced, so running = declared
 #   workloads   PDBs that would hang a drain block the run; single replicas and
 #               unprotected workloads are listed (and block with `strict`)
+#   platform    the traffic path — gateways, CoreDNS, istiod, the Load Balancer
+#               Controller, Karpenter — is 2+ replicas on 2+ nodes under a PDB, and
+#               the node data plane is complete. Blocks, strict or not
+#   probe       a request loop through the ingress ALB, from the bastion, until the end
+#   hold        Karpenter's nodes marked do-not-disrupt: applications move last
 #   1/4         control plane                 — no pod moves
 #   2/4         system node group             — EKS rolls it: new node first, then
 #                                               cordon, drain against PDBs, terminate
 #   3/4         add-ons                       — after the nodes, as depends_on says
-#   4/4         Karpenter nodes               — Karpenter's drift replaces them,
-#                                               one at a time (NodePool budget)
+#   4/4         Karpenter nodes               — released; drift replaces them, one at
+#                                               a time (NodePool budget)
 #   verify      every node on the new minor, every workload and Application healthy
+#   report      the probe's results, per phase, in the run summary
+#
+# Between phases a health gate waits for the cluster to recover — nodes Ready, data
+# plane complete, traffic path redundant, Applications Healthy, probe answering — so
+# no phase starts on top of the previous one's damage.
 #
 # Nothing here runs `kubectl drain`: EKS and Karpenter already surge, cordon and drain
 # against PDBs, and a second drain would race them. This workflow orders, waits and
@@ -30,10 +40,15 @@ on:
         type: choice
         options: [hml, prod]
       strict:
-        description: "Block on single-replica or PDB-less workloads, not only warn"
+        description: "Block on single-replica or PDB-less workloads, and fail on any failed probe request"
         required: false
         default: false
         type: boolean
+      probe-path:
+        description: "Path requested through the ingress ALB for the whole upgrade (empty: no probe)"
+        required: false
+        default: "/sim/"
+        type: string
 
 permissions:
   contents: read
@@ -75,6 +90,12 @@ jobs:
     env:
       ENVIRONMENT: ${{ inputs.environment }}
       STRICT: ${{ inputs.strict && '--strict' || '' }}
+      # Through env, not interpolated into the script: a free-text input expanded
+      # by ${{ }} becomes shell source.
+      PROBE_PATH: ${{ inputs.probe-path }}
+      # "<epoch> <phase>" per line, written as each phase starts; the probe report
+      # splits its results on them.
+      MARKS: ${{ runner.temp }}/phase-marks
     steps:
       - name: Checkout
         uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
@@ -108,14 +129,30 @@ jobs:
       - name: Workload readiness — what a node roll will disrupt
         run: ./scripts/eks-upgrade.sh workloads ${STRICT:+"$STRICT"}
 
+      # Blocking regardless of `strict`: every application depends on these at once.
+      - name: Traffic path — redundant before anything moves
+        run: ./scripts/eks-upgrade.sh platform
+
+      - name: Start the availability probe
+        id: probe
+        if: env.PROBE_PATH != ''
+        run: ./scripts/eks-upgrade.sh probe start "$ENVIRONMENT" "$PROBE_PATH"
+
+      # Applications last. The control plane's new minor drifts every Karpenter node
+      # at once (see `karpenter` in the script); held, they wait for phase 4.
+      - name: Hold Karpenter's nodes until phase 4
+        run: ./scripts/eks-upgrade.sh karpenter hold
+
       - name: 1/4 Control plane
         run: |
           set -euo pipefail
+          echo "$(date +%s) 1/4 control plane" >>"$MARKS"
           ./scripts/eks-upgrade.sh apply "$ENVIRONMENT" module.eks_cluster
           aws eks wait cluster-active --region "$REGION" --name "$CLUSTER"
           VERSION=$(aws eks describe-cluster --region "$REGION" --name "$CLUSTER" --query cluster.version --output text)
           [ "$VERSION" = "$TARGET" ] || { echo "::error::control plane reports $VERSION, expected $TARGET"; exit 1; }
           echo "control plane on $VERSION"
+          ./scripts/eks-upgrade.sh health "$ENVIRONMENT" 600
 
       # Terraform waits for EKS to finish the roll, and EKS fails it if a PDB keeps
       # a pod from being evicted for 15 minutes — the preflight exists so that
@@ -123,12 +160,17 @@ jobs:
       - name: 2/4 System node group
         run: |
           set -euo pipefail
+          echo "$(date +%s) 2/4 system node group" >>"$MARKS"
+          ./scripts/eks-upgrade.sh karpenter hold
           ./scripts/eks-upgrade.sh apply "$ENVIRONMENT" module.eks_managed-node-group
           ./scripts/eks-upgrade.sh nodes eks.amazonaws.com/nodegroup "$TARGET" 900
+          ./scripts/eks-upgrade.sh health "$ENVIRONMENT" 600
 
       - name: 3/4 Add-ons
         run: |
           set -euo pipefail
+          echo "$(date +%s) 3/4 add-ons" >>"$MARKS"
+          ./scripts/eks-upgrade.sh karpenter hold
           ./scripts/eks-upgrade.sh apply "$ENVIRONMENT" module.eks_addons
           NOT_ACTIVE=$(for A in $(aws eks list-addons --region "$REGION" --cluster-name "$CLUSTER" --query 'addons[]' --output text); do
             S=$(aws eks describe-addon --region "$REGION" --cluster-name "$CLUSTER" --addon-name "$A" --query addon.status --output text)
@@ -136,16 +178,39 @@ jobs:
           done)
           [ -z "$NOT_ACTIVE" ] || { echo "::error::add-ons not ACTIVE: $NOT_ACTIVE"; exit 1; }
           echo "every add-on ACTIVE"
+          ./scripts/eks-upgrade.sh health "$ENVIRONMENT" 600
 
       # Nothing to apply: the EC2NodeClass selects `al2023@latest`, which resolves
-      # against the control plane's version, so the upgrade has already made every
-      # Karpenter node drifted. Karpenter replaces them at the pace of the NodePool's
-      # disruption budget. This step waits for that, and skips if there are none.
+      # against the control plane's version, so every Karpenter node has been drifted
+      # since phase 1 — held until now. Released, Karpenter replaces them at the pace
+      # of the NodePool's disruption budget. Skips the wait if there are none.
       - name: 4/4 Karpenter nodes
-        run: ./scripts/eks-upgrade.sh nodes karpenter.sh/nodepool "$TARGET" 3600
+        run: |
+          set -euo pipefail
+          echo "$(date +%s) 4/4 Karpenter nodes" >>"$MARKS"
+          ./scripts/eks-upgrade.sh karpenter release
+          ./scripts/eks-upgrade.sh nodes karpenter.sh/nodepool "$TARGET" 3600
+          ./scripts/eks-upgrade.sh health "$ENVIRONMENT" 600
 
       - name: Verify — nodes, workloads, Argo CD Applications
-        run: ./scripts/eks-upgrade.sh verify "$TARGET" 900
+        run: |
+          echo "$(date +%s) verify" >>"$MARKS"
+          ./scripts/eks-upgrade.sh verify "$TARGET" 900
+
+      # Also after a failure: which phase lost requests is most worth knowing then.
+      # Stops the probe either way.
+      - name: Availability report — requests through the ALB, per phase
+        if: always() && steps.probe.outcome == 'success'
+        run: ./scripts/eks-upgrade.sh probe report "$ENVIRONMENT" "$MARKS" ${STRICT:+"$STRICT"}
+
+      # Not released automatically: a run that failed mid-upgrade is resumed by
+      # running it again, and its nodes should not start moving in between.
+      - name: Karpenter nodes still held
+        if: failure()
+        run: |
+          HELD=$(kubectl get nodes -l eks-upgrade/held -o name 2>/dev/null || true)
+          [ -z "$HELD" ] && exit 0
+          echo "::warning::$(wc -l <<<"$HELD") Karpenter node(s) still marked do-not-disrupt. Rerun eks-upgrade to finish, or release them: ./scripts/eks-upgrade.sh karpenter release"
 
       # Every phase was a -target. Anything else pending in foundation is reported,
       # not applied — that is terraform-deploy's job, with its full plan on screen.

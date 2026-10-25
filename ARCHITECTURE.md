@@ -106,7 +106,9 @@ hands the cluster to Argo CD.
 - **Private subnet, no public IP, no inbound SSH.** SSM Session Manager only; IMDSv2
   required, root volume encrypted.
 - **Least-privilege egress, no `0.0.0.0/0`:** HTTPS to the VPC CIDR, DNS to the VPC
-  resolver, HTTPS to the **in-region** S3 prefix list.
+  resolver, HTTPS to the **in-region** S3 prefix list, and HTTP to the VPC CIDR for the
+  internal ingress ALB — the place it is meant to be tried from, and where
+  `eks-upgrade` probes it from (§13).
   - A gateway endpoint only routes to S3 in its own region. AWS's public `amazon-eks`
     bucket is in us-west-2, so that request matched no egress rule and **hung
     silently**. `kubectl` is copied to an in-region bucket by the pipeline instead.
@@ -338,7 +340,7 @@ EKS cluster         →   eks-cluster-sg     →   the VPC
 | Human cluster access | hml lists an IAM user and the account **root** | Per-session role, MFA, no standing cluster-admin |
 | Prod approval | Reviewer approves before the job starts | plan → approve-with-plan → apply |
 | Teardown | Ordered, with sweeps | Exercise the sweeps' delete paths |
-| Upgrade readiness | `eks-upgrade` blocks only on PDBs that allow no disruption; single replicas and PDB-less workloads are warnings unless `strict` is set | `strict` on by default, once every workload carries replicas and a PDB |
+| Upgrade readiness | `eks-upgrade` blocks on PDBs that allow no disruption and on a traffic path below two-on-two-nodes; application single replicas and PDB-less workloads are warnings, and failed probe requests a warning, unless `strict` is set | `strict` on by default, once every workload carries replicas and a PDB |
 | Components without a matrix | Gateway API, kube-prometheus-stack, Kiali and the AWS Load Balancer Controller publish no Kubernetes compatibility matrix; `eks-upgrade` reports them as unverified and relies on EKS upgrade insights for removed APIs | Read their release notes per upgrade |
 
 ## 13. Upgrades
@@ -354,17 +356,18 @@ So the pipeline drives Terraform rather than going around it, in two workflows:
 
 | Workflow | Does | Writes to AWS |
 |---|---|---|
-| `eks-upgrade-pr` | Checks the step is one minor, resolves each add-on's EKS-default version for it — never below the current pin, since EKS does not downgrade add-ons — rewrites the seven values in hml **and** prod, pushes `upgrade/eks-<minor>` and opens it as a draft pull request | No — plan role |
+| `eks-upgrade-pr` | Checks the step is one minor, resolves each add-on's EKS-default version for it — never below the current pin, since EKS does not downgrade add-ons — rewrites the seven values in hml **and** prod, pushes `upgrade/eks-<minor>` and opens a pull request | No — plan role |
 | `eks-upgrade` | Upgrades one environment's live cluster in phases, checking between them | Yes — deploy role, Environment-gated |
 
-A person starts the checks between the two. A pull request opened with
-`GITHUB_TOKEN` triggers no workflows, so `eks-upgrade-pr` opens it as a **draft**
-and the pull-request workflows also listen for `ready_for_review`: marking it ready
-is the person's event, and it runs every check. A token that does trigger workflows —
-a PAT or a GitHub App — would remove the click at the cost of a write credential
-stored in the repository. Opening the pull request needs the repository setting
-"Allow GitHub Actions to create and approve pull requests"; without it the workflow
-falls back to a compare link in its summary.
+The checks run on the pull request like on any other. GitHub documents that events
+caused by `GITHUB_TOKEN` start no workflows, so the pull request was first opened as a
+draft, with the checks also listening for `ready_for_review` — a person's event. In
+practice its `opened` event ran every check each time (attributed to whoever
+dispatched the workflow), and marking it ready then started a duplicate set that
+cancelled the first and left the pull request red. So it opens ready, and the
+fallback, should the checks ever not start, is closing and reopening it. Opening it
+needs the repository setting "Allow GitHub Actions to create and approve pull
+requests"; without it the workflow leaves a compare link in its summary.
 
 **Phases, in the order the code already implies.** `module.eks_addons` declares
 `depends_on = [module.eks_managed-node-group]`, so a `-target` on the add-ons pulls in
@@ -377,10 +380,29 @@ workflow adds a saved, targeted plan per phase and a check after each one.
 | Control plane | Nothing — EKS replaces API servers; pods keep running | Cluster `ACTIVE`, reports the target version |
 | System node group | EKS: a new node first, then cordon, drain against PDBs, terminate — `max_unavailable = 1` | Every node group node on the target and Ready |
 | Add-ons | Rolling updates of their own DaemonSets/Deployments | Every add-on `ACTIVE` |
-| Karpenter nodes | Karpenter's drift: `al2023@latest` resolves against the control plane's version, so every node is drifted at once and replaced at the NodePool budget (`nodes: "1"`) | Every `karpenter.sh/nodepool` node on the target and Ready |
+| Karpenter nodes | Karpenter's drift, released only now (below), replacing nodes at the NodePool budget (`nodes: "1"`) | Every `karpenter.sh/nodepool` node on the target and Ready |
 
-Then every Deployment, StatefulSet and Argo CD Application must be healthy, and a
-closing full plan reports — never applies — anything else pending.
+After each phase a **health gate** waits — up to ten minutes, then stops the run —
+until every node is Ready and schedulable, the per-node data plane (CNI, kube-proxy,
+ztunnel, istio-cni) has a current Ready pod everywhere, the traffic path is back to
+two replicas on two nodes, every Argo CD Application is Synced and Healthy, and the
+probe's last fifty requests answered. The next phase never starts on top of the last
+one's damage. Then every Deployment, StatefulSet and Application must be healthy, and
+a closing full plan reports — never applies — anything else pending.
+
+**Applications move last, and that has to be enforced.** The EC2NodeClass selects
+`al2023@latest`; the alias resolves through an SSM path that carries the cluster's
+minor, so the moment the control plane reports the target every Karpenter node is
+drifted — and Karpenter started replacing them while the system node group was still
+rolling. Pinning the alias to an AMI version does not help; the path still carries
+the minor. The first hml rehearsal had the gateway, the applications and istiod in
+motion at once. So before phase 1 the workflow marks each Karpenter node
+`karpenter.sh/do-not-disrupt`, which stops drift and consolidation (not expiry or a
+Spot interruption — those are not Karpenter's choice), and releases them in phase 4.
+It is set on the Node, not the NodePool, so Git does not change and Argo CD has
+nothing to revert; a label records which nodes the run marked, so an annotation set by
+hand survives the release. A failed run leaves them held — its resume should not find
+them moving — and says so.
 
 **No `kubectl drain`, and no uncordon.** Both node owners already surge, cordon and
 drain against PDBs; a drain from the pipeline would race them. And EKS replaces
@@ -420,9 +442,17 @@ support the new API server stops provisioning, and the node phases depend on it.
 `eks-upgrade-pr` runs it before pushing a branch; `eks-upgrade` again before the
 control plane moves, since that is the step with no way back.
 
-**Transparency is a property of the workloads, not of the pipeline.** A drain evicts;
-whether that is visible depends on what was evicted. The preflight reads the cluster
-before anything moves:
+**The traffic path blocks; applications warn.** A drain evicts; whether that is
+visible depends on what was evicted. Some components are on every request's path —
+the gateway, CoreDNS, istiod (a pod on a new node cannot connect until ztunnel has its
+certificate from istiod), the Load Balancer Controller (which moves the ALB's targets
+as the gateway pods move) and Karpenter (which provisions what the drains need). One
+replica of any of them is an outage for every application at once; the first hml
+rehearsal lost three requests to an istiod moved mid-drain. So `platform` blocks,
+with or without `strict`, unless each runs two or more replicas, all available, Ready
+on at least two nodes, under a PDB that allows a disruption now — and the node data
+plane is complete. Gateways are found by label. For applications the preflight reads
+the cluster before anything moves:
 
 - **Blocks:** a PDB allowing zero disruptions. EKS abandons a node group update after
   15 minutes of failed evictions; Karpenter waits indefinitely. Either way it is better
@@ -434,6 +464,18 @@ before anything moves:
 What makes a workload pass: 2+ replicas, a PDB (`minAvailable: 1` or
 `maxUnavailable: 1`), a readiness probe, `topologySpreadConstraints` across nodes, and
 a `preStop` delay long enough for the ALB to deregister the target.
+
+**Availability is measured, not inferred.** For the whole run a loop on the bastion
+requests a path (`probe-path`, default `/sim/`) through the internal ingress ALB, five
+times a second. The bastion because it is the one host no phase replaces — a probe pod
+would be evicted by the drains it is observing, its counts with it; and through the
+ALB because that is a client's path, with target registration, the gateway's drain and
+its readiness gate on it. The path must answer before anything moves. Each phase
+writes a timestamp as it starts, and the run summary splits the results on them:
+requests and failures per phase, with the first failure's time. Failures are a
+warning, or fail the run with `strict` — after the fact either way, since nothing
+undoes a phase; the point is that "no request failed" is a number in the summary,
+not an impression.
 
 **One cluster at a time.** hml first, verified end to end; then prod through its
 Environment's reviewer. Nothing enforces the order across accounts — prod's deploy

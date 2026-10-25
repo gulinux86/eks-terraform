@@ -7,11 +7,15 @@
 #   preflight <env> [--advisory]  version skew, cluster status, EKS upgrade insights
 #   compat <env> <minor> [--live]  every Helm-installed component supports <minor>
 #   workloads [--strict]          PDBs that would block a drain; workloads that would blink
+#   platform                      the traffic path is highly available — blocks if not
+#   karpenter hold|release        keep Karpenter's nodes in place until the last phase
+#   probe start|report <env> ...  requests through the ingress ALB, from the bastion
 #   apply <env> <target>          plan -target -out, apply the saved plan if it has changes
 #   nodes <selector> <minor> <s>  wait until every matching node runs <minor> and is Ready
+#   health <env> <seconds>        between phases: nodes, data plane, traffic path, probe
 #   verify <minor> <seconds>      nodes, Deployments, StatefulSets, Argo CD Applications
 #
-# Needs AWS credentials for bump/preflight/apply, and a kubeconfig for the rest.
+# Needs AWS credentials for bump/preflight/apply/probe, and a kubeconfig for the rest.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -463,6 +467,252 @@ cmd_workloads() {
   echo "workloads: $N_SINGLE single-replica, $N_NOPDB without a PDB — see warnings"
 }
 
+# --- platform -----------------------------------------------------------------
+# The components every request crosses, held to more than `workloads` asks of an
+# application. The gateway takes every request in; CoreDNS resolves every name;
+# istiod issues the certificate ztunnel needs before a pod on a new node can open a
+# connection; the Load Balancer Controller moves the ALB's targets as the gateway
+# pods move; Karpenter provisions the capacity the drains need. One replica of any
+# of them turns a single drain into an outage for every application at once — the
+# hml 1.35→1.36 rehearsal lost requests to exactly that: an istiod moved mid-drain,
+# and a pod started in that window could not connect.
+#
+# So these block, with or without --strict: two or more replicas, all available, the
+# Ready ones on at least two nodes, under a PDB that allows a disruption now. And
+# the per-node data plane — CNI, kube-proxy, ztunnel, istio-cni — has a Ready,
+# current pod on every node. Gateways are found by label, so a second Gateway is
+# held to the same bar without a change here.
+CRITICAL=(kube-system/coredns kube-system/aws-load-balancer-controller kube-system/karpenter istio-system/istiod)
+DATAPLANE_NAMESPACES='["kube-system", "istio-system"]'
+
+# Fails (non-zero) when it cannot read the cluster: callers turn that into a
+# finding, so an unreadable traffic path never passes as a healthy one.
+critical_findings() {
+  local DIR RC=0
+  DIR=$(mktemp -d)
+  # Files, not --argjson: every pod in the cluster is past the argument-size limit,
+  # and jq failing there would print nothing — which reads as "no findings".
+  printf '%s\n' "${CRITICAL[@]}" | jq -R . | jq -s . >"$DIR/want" &&
+    kubectl get pdb -A -o json >"$DIR/pdbs" &&
+    kubectl get pods -A -o json >"$DIR/pods" &&
+    kubectl get deploy -A -o json >"$DIR/deploys" &&
+    jq -r --slurpfile want "$DIR/want" --slurpfile pdbs "$DIR/pdbs" --slurpfile pods "$DIR/pods" '
+      def id: "\(.metadata.namespace)/\(.metadata.name)";
+      def covers($labels): ((.spec.selector.matchLabels // {}) as $m
+        | $m != {} and ($m | to_entries | all(. as $e | $labels[$e.key] == $e.value)));
+      $want[0] as $want
+      | [.items[] | select((id as $i | $want | index($i))
+                           or (.spec.template.metadata.labels // {} | has("gateway.networking.k8s.io/gateway-name")))] as $crit
+      | (($want - [$crit[] | id])[] | "\(.) — not found"),
+        ($crit[]
+         | . as $d | id as $i | ($d.spec.replicas // 1) as $n
+         | [$pods[0].items[]
+            | select(.metadata.namespace == $d.metadata.namespace and .metadata.deletionTimestamp == null)
+            | (.metadata.labels // {}) as $l
+            | select($d.spec.selector.matchLabels // {} | to_entries | all(. as $e | $l[$e.key] == $e.value))
+            | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+            | .spec.nodeName] | unique as $nodes
+         | [$pdbs[0].items[] | select(.metadata.namespace == $d.metadata.namespace)
+            | select(covers($d.spec.template.metadata.labels // {}))] as $cover
+         | if $n < 2 then "\($i) — \($n) replica"
+           elif ($d.status.availableReplicas // 0) < $n then "\($i) — \($d.status.availableReplicas // 0)/\($n) available"
+           elif ($nodes | length) < 2 then "\($i) — every Ready replica on one node (\($nodes | join(",")))"
+           elif ($cover | length) == 0 then "\($i) — no PodDisruptionBudget"
+           elif ([$cover[] | .status.disruptionsAllowed // 0] | max) < 1 then "\($i) — its PodDisruptionBudget allows no disruption now"
+           else empty end)' "$DIR/deploys" || RC=$?
+  rm -rf "$DIR"
+  return "$RC"
+}
+
+dataplane_findings() {
+  kubectl get ds -A -o json | jq -r --argjson ns "$DATAPLANE_NAMESPACES" '.items[]
+    | select(.metadata.namespace as $n | $ns | index($n))
+    | .status.desiredNumberScheduled as $want
+    | select(($want // 0) > 0)
+    | select((.status.numberReady // 0) < $want
+             or (.spec.updateStrategy.type == "RollingUpdate" and (.status.updatedNumberScheduled // 0) < $want))
+    | "daemonset \(.metadata.namespace)/\(.metadata.name) — \(.status.numberReady // 0)/\($want) Ready, \(.status.updatedNumberScheduled // 0) current"'
+}
+
+argo_findings() {
+  kubectl get crd applications.argoproj.io >/dev/null 2>&1 || return 0
+  kubectl get applications -A -o json | jq -r '.items[]
+    | select(.status.sync.status != "Synced" or .status.health.status != "Healthy")
+    | "application \(.metadata.name) \(.status.sync.status)/\(.status.health.status)"'
+}
+
+cmd_platform() {
+  local BAD
+  BAD=$({
+    critical_findings || echo "could not read the traffic path's Deployments, pods and PDBs"
+    dataplane_findings || echo "could not read the DaemonSets"
+  } | sed '/^$/d')
+  summary "### Traffic path"
+  summary ""
+  if [ -z "$BAD" ]; then
+    echo "traffic path: ${CRITICAL[*]} and every gateway — 2+ replicas on 2+ nodes, PDB allowing one out; data plane Ready on every node"
+    summary "Gateways, ${CRITICAL[*]}: 2+ replicas on 2+ nodes, each under a PDB allowing a disruption. Node data plane Ready everywhere."
+    return 0
+  fi
+  while read -r L; do echo "::error::traffic path: $L"; summary "- ❌ \`$L\`"; done <<<"$BAD"
+  die "the traffic path would go down with a single drain — fix the components above (platform-gitops, or the add-on configuration in this repository), let them roll out, then rerun"
+}
+
+# --- karpenter ----------------------------------------------------------------
+# Keeps the application nodes where they are until the platform has moved.
+#
+# The EC2NodeClass selects `al2023@latest`, and the alias resolves through an SSM
+# path that carries the cluster's minor — so the moment the control plane reports
+# the target, every Karpenter node is drifted, and Karpenter starts replacing them
+# while the system node group is still rolling. Pinning the alias to a version does
+# not help: the path still carries the minor. On hml that put the gateway, the
+# applications and istiod in motion together.
+#
+# `karpenter.sh/do-not-disrupt` on a node stops every voluntary disruption of it —
+# drift and consolidation; not expiry or a Spot interruption, which are not
+# Karpenter's choice. It is set on the Node rather than in the NodePool, so nothing
+# in Git changes and Argo CD has nothing to revert. Only nodes this step marked are
+# released (label eks-upgrade/held), so an annotation someone set by hand survives.
+#
+# `hold` is repeated before each phase, which catches a node launched in between on
+# the old image; one launched after the control plane moved is already on the new.
+cmd_karpenter() {
+  local NODES N
+  case "${1:-}" in
+    hold)
+      NODES=$(kubectl get nodes -l 'karpenter.sh/nodepool,!eks-upgrade/held' -o json | jq -r '.items[]
+        | select(.metadata.annotations["karpenter.sh/do-not-disrupt"] != "true") | .metadata.name')
+      for N in $NODES; do
+        kubectl annotate node "$N" karpenter.sh/do-not-disrupt=true --overwrite >/dev/null
+        kubectl label node "$N" eks-upgrade/held=true --overwrite >/dev/null
+        echo "held $N"
+      done
+      echo "Karpenter nodes held: $(kubectl get nodes -l eks-upgrade/held -o name | wc -l)"
+      ;;
+    release)
+      for N in $(kubectl get nodes -l eks-upgrade/held -o name); do
+        kubectl annotate "$N" karpenter.sh/do-not-disrupt- >/dev/null
+        kubectl label "$N" eks-upgrade/held- >/dev/null
+        echo "released ${N#node/}"
+      done
+      ;;
+    *) die "usage: karpenter hold|release" ;;
+  esac
+}
+
+# --- probe --------------------------------------------------------------------
+# Availability measured, not inferred: a loop on the bastion requesting <path>
+# through the internal ingress ALB, five times a second, for the whole upgrade.
+#
+# The bastion because it is the one host no phase replaces — a probe pod would be
+# evicted by the drains it is meant to observe, and its counts with it. And through
+# the ALB because that is the path a client takes: target registration, the
+# gateway's drain and the readiness gate are all on it, and none is on a request
+# made to the Service from inside the cluster.
+#
+# Results stay on the bastion (one line per request: epoch, HTTP code) and are
+# split by the phase marks the workflow writes, so a failure is attributed to the
+# phase that caused it.
+PROBE_LOG=/var/log/eks-upgrade-probe.log
+PROBE_UNIT=eks-upgrade-probe
+
+env_load() {
+  local FILE
+  FILE=$(tfvars "$1")
+  REGION=$(tfvar "$FILE" region)
+  PROJECT=$(tfvar "$FILE" project_name)
+}
+
+bastion_id() {
+  aws ec2 describe-instances --region "$REGION" \
+    --filters "Name=tag:Name,Values=$PROJECT-bastion" Name=instance-state-name,Values=running \
+    --query 'Reservations[0].Instances[0].InstanceId' --output text
+}
+
+# Runs a shell script on an instance through SSM and prints its stdout.
+ssm_run() {
+  local ID OUT
+  ID=$(aws ssm send-command --region "$REGION" --instance-ids "$1" --document-name AWS-RunShellScript \
+    --parameters "$(jq -cn --arg c "$2" '{commands: [$c]}')" --query Command.CommandId --output text) || return 1
+  aws ssm wait command-executed --region "$REGION" --command-id "$ID" --instance-id "$1" 2>/dev/null || true
+  OUT=$(aws ssm get-command-invocation --region "$REGION" --command-id "$ID" --instance-id "$1" --output json)
+  [ "$(jq -r .Status <<<"$OUT")" = Success ] || { jq -r .StandardErrorContent <<<"$OUT" >&2; return 1; }
+  jq -r .StandardOutputContent <<<"$OUT"
+}
+
+# "requests failures" over the last N lines of the probe log, or "inactive".
+probe_tail() {
+  ssm_run "$1" "systemctl is-active -q $PROBE_UNIT || { echo inactive; exit 0; }
+tail -n $2 $PROBE_LOG | awk '{ n++; if (\$2 != 200) f++ } END { print n + 0, f + 0 }'"
+}
+
+cmd_probe() {
+  local ACTION=${1:-} ENV=${2:?usage: probe start <env> <path> | probe report <env> <marks file> [--strict]}
+  env_load "$ENV"
+  local ID
+  ID=$(bastion_id)
+  [ -n "$ID" ] && [ "$ID" != None ] || die "no running instance tagged $PROJECT-bastion to probe from"
+
+  case "$ACTION" in
+    start)
+      local PROBE_PATH=${3:?usage: probe start <env> <path>} DNS URL N F
+      DNS=$(aws elbv2 describe-load-balancers --region "$REGION" --names "$PROJECT-platform-ingress" \
+        --query 'LoadBalancers[0].DNSName' --output text) || die "no load balancer $PROJECT-platform-ingress"
+      URL="http://$DNS$PROBE_PATH"
+      # A transient systemd unit: it outlives the SSM command, a rerun replaces it,
+      # and RuntimeMaxSec stops it even if no report ever runs.
+      ssm_run "$ID" "systemctl stop $PROBE_UNIT 2>/dev/null; systemctl reset-failed $PROBE_UNIT 2>/dev/null
+: >$PROBE_LOG
+systemd-run --quiet --unit=$PROBE_UNIT --property=RuntimeMaxSec=14400 /bin/bash -c 'while :; do echo \"\$(date +%s) \$(curl -s -o /dev/null -m 2 -w %{http_code} $URL)\" >>$PROBE_LOG; sleep 0.2; done'" >/dev/null \
+        || die "could not start the probe on $ID"
+      # Before anything moves the path must answer, or the probe would measure that
+      # instead of the upgrade.
+      sleep 20
+      read -r N F <<<"$(probe_tail "$ID" 1000)"
+      [ "${N:-0}" -gt 0 ] && [ "${F:-1}" -eq 0 ] \
+        || die "baseline: ${F:-?} of ${N:-0} requests to $URL failed before anything moved — fix the path or pass another probe path (code 000 is no connection at all: the bastion's egress, or the ALB's security group)"
+      echo "probe: $URL from $ID — $N requests before the upgrade, all 200"
+      summary "Availability probe: \`GET $PROBE_PATH\` through the ingress ALB, from the bastion."
+      ;;
+
+    report)
+      local MARKS=${3:?usage: probe report <env> <marks file> [--strict]} STRICT=${4:-} T OUT
+      T=$(cut -d' ' -f1 "$MARKS" | paste -sd' ')
+      OUT=$(ssm_run "$ID" "systemctl stop $PROBE_UNIT 2>/dev/null
+awk -v marks='$T' 'BEGIN { m = split(marks, t, \" \") }
+  { p = 0; for (i = 1; i <= m; i++) if (\$1 >= t[i]) p = i
+    if (\$2 == 200) ok[p]++; else { bad[p]++; if (!first[p]) first[p] = \$1 } }
+  END { for (i = 0; i <= m; i++) print i, ok[i] + 0, bad[i] + 0, first[i] + 0 }' $PROBE_LOG") \
+        || die "could not read the probe's results from $ID"
+
+      summary ""
+      summary "### Availability through the upgrade"
+      summary ""
+      summary "| Phase | Requests OK | Failed | First failure (UTC) |"
+      summary "|---|---|---|---|"
+      local I OK BAD FIRST LABEL TOTAL_OK=0 TOTAL_BAD=0
+      while read -r I OK BAD FIRST; do
+        if [ "$I" -eq 0 ]; then LABEL="before the first phase"; else LABEL=$(sed -n "${I}p" "$MARKS" | cut -d' ' -f2-); fi
+        [ "$FIRST" -gt 0 ] && FIRST=$(date -u -d "@$FIRST" +%T) || FIRST="—"
+        printf '  %-28s ok %-6s failed %-4s first %s\n' "$LABEL" "$OK" "$BAD" "$FIRST"
+        summary "| $LABEL | $OK | $([ "$BAD" -gt 0 ] && echo "**$BAD**" || echo 0) | $FIRST |"
+        TOTAL_OK=$((TOTAL_OK + OK)) TOTAL_BAD=$((TOTAL_BAD + BAD))
+      done <<<"$OUT"
+      summary "| **total** | $TOTAL_OK | $TOTAL_BAD | |"
+
+      if [ "$TOTAL_BAD" -eq 0 ]; then
+        echo "availability: $TOTAL_OK requests through the upgrade, none failed"
+      elif [ "$STRICT" = --strict ]; then
+        die "availability: $TOTAL_BAD of $((TOTAL_OK + TOTAL_BAD)) requests failed during the upgrade"
+      else
+        warn "availability: $TOTAL_BAD of $((TOTAL_OK + TOTAL_BAD)) requests failed during the upgrade — the table in the summary says in which phase"
+      fi
+      ;;
+
+    *) die "usage: probe start <env> <path> | probe report <env> <marks file> [--strict]" ;;
+  esac
+}
+
 # --- apply --------------------------------------------------------------------
 # One phase = one targeted, saved plan, applied as planned. Not -detailed-exitcode:
 # in CI `terraform` is hashicorp/setup-terraform's wrapper, which reports exit 2
@@ -505,6 +755,46 @@ cmd_nodes() {
   done
 }
 
+# --- health -------------------------------------------------------------------
+# The gate between phases: the next one starts only on a cluster that has
+# recovered from the last. Every node Ready, the per-node data plane complete, the
+# traffic path back to two-on-two-nodes, every Application Synced and Healthy — and,
+# while the probe runs, the last fifty requests through the ALB answered.
+#
+# Not a version check: that is `nodes` for each phase and `verify` at the end.
+cmd_health() {
+  local ENV=${1:?usage: health <env> <timeout s>} TIMEOUT=${2:?usage: health <env> <timeout s>}
+  local DEADLINE=$((SECONDS + TIMEOUT)) BAD ID="" N F
+  env_load "$ENV"
+  ID=$(bastion_id 2>/dev/null || true)
+  [ "$ID" = None ] && ID=""
+  while :; do
+    BAD=$(
+      kubectl get nodes -o json | jq -r '.items[]
+        | select((any(.status.conditions[]; .type == "Ready" and .status == "True") | not) or .spec.unschedulable)
+        | "node \(.metadata.name) not Ready or cordoned"'
+      dataplane_findings || echo "could not read the DaemonSets"
+      critical_findings || echo "could not read the traffic path's Deployments, pods and PDBs"
+      argo_findings || echo "could not read the Argo CD Applications"
+      if [ -n "$ID" ]; then
+        read -r N F <<<"$(probe_tail "$ID" 50 || echo inactive)"
+        [ "$N" = inactive ] || [ "${F:-0}" -eq 0 ] || echo "probe — $F of the last $N requests through the ALB failed"
+      fi
+    )
+    BAD=$(sed '/^$/d' <<<"$BAD")
+    if [ -z "$BAD" ]; then
+      echo "healthy: nodes Ready, data plane complete, traffic path redundant, Applications Synced/Healthy${ID:+, probe answering}"
+      return 0
+    fi
+    if [ $SECONDS -ge $DEADLINE ]; then
+      while read -r L; do echo "::error::$L"; done <<<"$BAD"
+      die "the cluster did not recover within ${TIMEOUT}s — the next phase would start on top of this"
+    fi
+    echo "$(date +%T) waiting on $(wc -l <<<"$BAD") item(s), e.g. $(head -1 <<<"$BAD")"
+    sleep 20
+  done
+}
+
 # --- verify -------------------------------------------------------------------
 # The upgrade is done when the cluster looks the way it did before it, one minor up.
 cmd_verify() {
@@ -524,11 +814,7 @@ cmd_verify() {
       kubectl get statefulset -A -o json | jq -r '.items[]
         | select((.status.readyReplicas // 0) < (.spec.replicas // 1))
         | "statefulset \(.metadata.namespace)/\(.metadata.name) \(.status.readyReplicas // 0)/\(.spec.replicas // 1) ready"'
-      if kubectl get crd applications.argoproj.io >/dev/null 2>&1; then
-        kubectl get applications -A -o json | jq -r '.items[]
-          | select(.status.sync.status != "Synced" or .status.health.status != "Healthy")
-          | "application \(.metadata.name) \(.status.sync.status)/\(.status.health.status)"'
-      fi
+      argo_findings || echo "could not read the Argo CD Applications"
     )
     if [ -z "$BAD" ]; then
       echo "every node on $TARGET and Ready; every Deployment, StatefulSet and Application healthy"
@@ -553,8 +839,12 @@ case "$CMD" in
   preflight) cmd_preflight "$@" ;;
   compat) cmd_compat "$@" ;;
   workloads) cmd_workloads "$@" ;;
+  platform) cmd_platform "$@" ;;
+  karpenter) cmd_karpenter "$@" ;;
+  probe) cmd_probe "$@" ;;
   apply) cmd_apply "$@" ;;
   nodes) cmd_nodes "$@" ;;
+  health) cmd_health "$@" ;;
   verify) cmd_verify "$@" ;;
-  *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

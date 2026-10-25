@@ -94,3 +94,18 @@ run "core_addons_managed_and_pinned" {
     error_message = "add-ons must set OVERWRITE conflict resolution on create and update"
   }
 }
+
+run "coredns_spread_across_nodes" {
+  command = plan
+
+  # Two CoreDNS replicas on one node go down together when it drains. A preferred
+  # anti-affinity (the add-on's default) allows exactly that; only a hard spread on
+  # hostname rules it out.
+  assert {
+    condition = anytrue([
+      for c in jsondecode(aws_eks_addon.this["coredns"].configuration_values).topologySpreadConstraints :
+      c.topologyKey == "kubernetes.io/hostname" && c.whenUnsatisfiable == "DoNotSchedule"
+    ])
+    error_message = "coredns must be spread across nodes with whenUnsatisfiable = DoNotSchedule"
+  }
+}
