@@ -35,6 +35,33 @@ locals {
   }
 }
 
+# CoreDNS: both replicas on one node is the add-on's default allowed outcome — its
+# anti-affinity is only preferred — and a drain of that node then takes DNS down
+# whole, PDB or not (the PDB paces evictions; it cannot move a pod first). Seen on
+# hml: both on one system node as it was cordoned. A hard spread on hostname rules
+# it out; the zone spread is EKS's own default, restated because this list replaces
+# it rather than adding to it.
+locals {
+  addon_configuration = {
+    "coredns" = jsonencode({
+      topologySpreadConstraints = [
+        {
+          maxSkew           = 1
+          topologyKey       = "kubernetes.io/hostname"
+          whenUnsatisfiable = "DoNotSchedule"
+          labelSelector     = { matchLabels = { "k8s-app" = "kube-dns" } }
+        },
+        {
+          maxSkew           = 1
+          topologyKey       = "topology.kubernetes.io/zone"
+          whenUnsatisfiable = "ScheduleAnyway"
+          labelSelector     = { matchLabels = { "k8s-app" = "kube-dns" } }
+        },
+      ]
+    })
+  }
+}
+
 resource "aws_eks_addon" "this" {
   for_each = local.addon_versions
 
@@ -50,6 +77,8 @@ resource "aws_eks_addon" "this" {
   # Only the EBS CSI driver needs to call the AWS API (to create, attach and
   # delete volumes). The others operate purely inside the cluster.
   service_account_role_arn = each.key == "aws-ebs-csi-driver" ? aws_iam_role.ebs_csi[0].arn : null
+
+  configuration_values = lookup(local.addon_configuration, each.key, null)
 
   tags = var.tags
 }

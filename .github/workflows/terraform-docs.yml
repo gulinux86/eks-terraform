@@ -12,9 +12,7 @@ name: terraform-docs
 
 on:
   pull_request:
-    # ready_for_review too: eks-upgrade-pr opens its pull request as a draft with
-    # GITHUB_TOKEN, which triggers nothing; marking it ready is what starts the checks.
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened]
     branches: [master, develop, main]
     paths:
       - "**.tf"

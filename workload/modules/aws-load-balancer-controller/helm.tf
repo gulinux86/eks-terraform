@@ -48,6 +48,29 @@ resource "helm_release" "eks_helm_controller" {
     value = "false"
   }
 
+  # Two replicas is the chart's default; what it leaves out is the PDB and a hard
+  # spread (its anti-affinity is only preferred). This controller registers the
+  # gateway's pod IPs in the ingress ALB's target group: with both replicas evicted
+  # together, a gateway pod moved in the same drain is never registered and the ALB
+  # keeps sending to the one that left. Its webhook also injects the gateway's
+  # readiness gate — failurePolicy Ignore, so a gateway pod created while no replica
+  # is up starts without the gate rather than not at all.
+  set {
+    name  = "podDisruptionBudget.maxUnavailable"
+    value = "1"
+  }
+
+  values = [yamlencode({
+    topologySpreadConstraints = [{
+      maxSkew           = 1
+      topologyKey       = "kubernetes.io/hostname"
+      whenUnsatisfiable = "DoNotSchedule"
+      labelSelector = {
+        matchLabels = { "app.kubernetes.io/name" = "aws-load-balancer-controller" }
+      }
+    }]
+  })]
+
   set {
     name  = "serviceAccount.create"
     value = "false"

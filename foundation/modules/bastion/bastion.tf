@@ -44,6 +44,19 @@ resource "aws_security_group" "bastion_sg" {
     cidr_blocks = [var.vpc_cidr]
   }
 
+  # The internal ingress ALB (workload layer, `platform-ingress`) listens on 80 and
+  # is reachable only from inside the VPC — the bastion is where it is meant to be
+  # tried from, and where `eks-upgrade` probes it for the length of an upgrade,
+  # since it is the one host no node roll replaces. Without this rule the module's
+  # own advice ("reach it from the bastion") timed out.
+  egress {
+    description = "HTTP to the internal ingress ALB"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
   egress {
     description     = "HTTPS to S3 via the gateway endpoint (aws CLI, ECR, dnf, kubectl)"
     from_port       = 443

@@ -5,10 +5,15 @@ name: eks-upgrade-pr
 # Moves kubernetes_version and the six add-on pins together, in hml and prod, each
 # pin set to the version EKS marks as default for the target release — the rule
 # CLAUDE.md states ("version bumps travel together"), done by scripts/eks-upgrade.sh
-# instead of by memory. The result is pushed to a branch and opened as a DRAFT pull
-# request. A pull request opened with GITHUB_TOKEN triggers no workflows, so its
-# checks start when a person marks it "Ready for review" — the PR workflows listen
-# for ready_for_review, and that event belongs to the person, not to the token.
+# instead of by memory. The result is pushed to a branch and opened as a pull
+# request, whose checks run as on any other.
+#
+# GitHub documents that events caused by GITHUB_TOKEN start no workflows, and this
+# pull request was first opened as a draft for a person to mark ready. In practice
+# its `opened` event has run every check, each time, attributed to whoever
+# dispatched this workflow — and the ready_for_review event then started a second,
+# duplicate set, which cancelled the first and left the pull request red. Should the
+# checks ever not start, closing and reopening it starts them (`reopened`).
 #
 # Step 2 is eks-upgrade.yml, after the merge. ARCHITECTURE.md §13.
 on:
@@ -21,7 +26,7 @@ on:
 
 permissions:
   contents: write # push the upgrade branch
-  pull-requests: write # open it as a draft
+  pull-requests: write # open the pull request
   id-token: write # OIDC
 
 concurrency:
@@ -72,7 +77,7 @@ jobs:
       - name: Upgrade insights for the live hml cluster
         run: ./scripts/eks-upgrade.sh preflight hml --advisory 2>&1 | tee /tmp/preflight || true
 
-      - name: Push the upgrade branch and open a draft pull request
+      - name: Push the upgrade branch and open a pull request
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -97,9 +102,9 @@ jobs:
           {
             echo "Moves \`kubernetes_version\` and the six add-on pins to EKS $TARGET, in hml and prod."
             echo ""
-            echo "**Draft on purpose:** opened by GITHUB_TOKEN, so no check has run yet."
-            echo "Mark it **Ready for review** to start them; merge once they pass, then run"
-            echo "**eks-upgrade** for \`hml\` — not terraform-deploy (ARCHITECTURE.md §13)."
+            echo "Merge once the checks pass, then run **eks-upgrade** for \`hml\` — not"
+            echo "terraform-deploy (ARCHITECTURE.md §13). If no check has started, close and"
+            echo "reopen this pull request."
             echo ""
             echo "### Version pins"
             echo '```'
@@ -111,16 +116,17 @@ jobs:
             echo '```'
             echo "### Upgrade insights (hml)"
             echo '```'
-            cat /tmp/preflight
+            # The REGION=/CLUSTER=/TARGET= lines are for eks-upgrade's $GITHUB_ENV.
+            grep -vE '^(REGION|CLUSTER|TARGET)=' /tmp/preflight || true
             echo '```'
           } >/tmp/body
 
           # Needs "Allow GitHub Actions to create and approve pull requests" in the
           # repository settings. Without it the branch is still pushed and the
           # summary carries the compare link instead.
-          if PR_URL=$(gh pr create --draft --base master --head "$BRANCH" \
+          if PR_URL=$(gh pr create --base master --head "$BRANCH" \
               --title "feat: upgrade EKS to $TARGET" --body-file /tmp/body); then
-            LINK="[Review the draft pull request]($PR_URL) and mark it **Ready for review** to run the checks."
+            LINK="[Review the pull request]($PR_URL) and let the checks run."
           else
             PR_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/master...$BRANCH?expand=1"
             echo "::warning::could not open the pull request — enable \"Allow GitHub Actions to create and approve pull requests\" in Settings → Actions → General"
