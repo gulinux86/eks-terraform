@@ -9,7 +9,8 @@ above that comes from
 cert-manager, Istio in ambient mode, Karpenter.
 
 Design decisions and their trade-offs are in **`ARCHITECTURE.md`**. Read the relevant
-section before changing a security-shaped default.
+section before changing a security-shaped default. Upgrading a cluster's Kubernetes
+version has its own runbook, **`UPGRADING.md`**.
 
 ```
 bootstrap/   state bucket (KMS) + OIDC roles + Spot SLR   run once per account
@@ -85,10 +86,19 @@ passes with a sweep between each. A local destroy does none of that — see §11
 aws eks update-kubeconfig --region us-east-1 --name eks-hml-cluster
 ```
 
-Or through the bastion, which already has `kubectl`:
+Or through the bastion, which already has `kubectl` — and is also where the internal
+ingress ALB answers from (its addresses are private to the VPC):
 
 ```bash
 aws ssm start-session --target "$(terraform -chdir=foundation output -raw bastion_instance_id)"
+```
+
+```bash
+# locally: the ALB's name
+aws elbv2 describe-load-balancers --names eks-hml-platform-ingress \
+  --query 'LoadBalancers[0].DNSName' --output text
+# on the bastion
+curl -s http://<that name>/sim/
 ```
 
 Nothing in the platform is exposed; reach the UIs by port-forward:
@@ -107,6 +117,19 @@ port-forward from a machine that already has cluster credentials.
 **Kiali needs traffic before it shows anything.** Its graph is drawn from
 `istio_requests_total`, which only accumulates while requests flow — a quiet cluster
 renders an empty topology that looks like a mesh problem.
+
+**Upgrading a cluster.** Never with `terraform-deploy` alone, and never from outside
+Terraform — the full procedure, the run's steps and what to do when one stops are in
+[`UPGRADING.md`](UPGRADING.md); the reasons in §13. In short:
+
+1. `eks-upgrade-pr` with the next minor — opens a pull request moving the version and
+   the six add-on pins in both environments. Merge it once its checks pass.
+2. `eks-upgrade` for `hml`, `strict` off the first time. Read the run summary: the
+   traffic-path check, then requests and failures per phase through the ingress ALB.
+3. `eks-upgrade` for `prod`, through its Environment's reviewer.
+
+Delete `upgrade/eks-<minor>` after the merge if it is still there — `eks-upgrade-pr`
+refuses to overwrite an existing branch.
 
 ## CI/CD
 
@@ -130,11 +153,12 @@ cannot drift from the check it mirrors. AWS auth comes from a composite action i
 whichever directories contain `tests/`.
 
 Six of twelve modules have suites: `network`, `cluster`, `eks-addons`, `karpenter`,
-`managed-node-group`, `platform-ingress` — 15 run blocks, 54 assertions, all with
+`managed-node-group`, `platform-ingress` — 16 run blocks, 55 assertions, all with
 mocked providers. They assert security invariants, not resource counts: that public
 subnets carry no `role/elb` tag, that the ingress load balancer is `internal`, that
 Karpenter can only terminate what carries both of its tags, that the system nodes
-follow the cluster's version. `bastion` is the gap that matters (§12).
+follow the cluster's version, that CoreDNS is spread across nodes. `bastion` is the
+gap that matters (§12).
 
 Deploys are never automatic on merge. `master` is the single deploy source;
 pull-request plans always resolve to `hml`.
@@ -162,8 +186,10 @@ workload/      same shape
                modules/{aws-load-balancer-controller,platform-ingress,
                         storage,argocd,argocd-bootstrap}/
 scripts/       check-layer-contract.sh · eks-upgrade.sh
-.github/       plan · test · security-scan · docs · deploy · destroy · eks-upgrade
+.github/       plan · test · security-scan · docs · deploy · destroy ·
+               eks-upgrade-pr · eks-upgrade
 .trivyignore   accepted exceptions — each needs a written reason
+UPGRADING.md   the EKS upgrade runbook
 ```
 
 Module `README.md`s are terraform-docs output under a handwritten title; regenerate

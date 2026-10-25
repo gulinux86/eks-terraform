@@ -216,8 +216,8 @@ Delivered by Argo CD (waves 9 and 10), not as an AWS add-on.
 
   | Role | Trusted claim | Used by |
   |---|---|---|
-  | plan (read-only) | `:pull_request`, `:ref:refs/heads/*` | `terraform-plan` |
-  | deploy (write) | `:environment:<env>` only | `terraform-deploy`, `terraform-destroy` |
+  | plan (read-only) | `:pull_request`, `:ref:refs/heads/*` | `terraform-plan`, `eks-upgrade-pr` |
+  | deploy (write) | `:environment:<env>` only | `terraform-deploy`, `terraform-destroy`, `eks-upgrade` |
 
   GitHub stamps `environment:<name>` only for a job declaring an Environment. **The
   Environment's branch policy is load-bearing:** without it a pull request could
@@ -248,6 +248,13 @@ Delivered by Argo CD (waves 9 and 10), not as an AWS add-on.
     either file looking wrong. An expression on `permissions` is not valid syntax, so
     the caller must grant what the called workflow declares even when an input
     disables the step that needs it.
+  - **Same symptom, different cause: a context used where it does not exist.** The
+    `runner` context is available inside steps but not in a job's `env`, and
+    `${{ runner.temp }}` there made `eks-upgrade` invalid as a whole — every dispatch a
+    `startup_failure`, and every push to `master` a failed run named after the file
+    path. YAML parsing passes it; only GitHub's own validation (or `actionlint`)
+    catches it, and nothing in CI runs that yet (§12). Inside a step the shell
+    variable (`$RUNNER_TEMP`) is the reliable form.
 - **AWS auth is one composite action**, in [`ci-templates`](https://github.com/gulinux86/ci-templates),
   pinned by commit SHA. A tag is mutable: whoever controls that repository could
   repoint it and every consumer would run different code with no diff
@@ -341,9 +348,14 @@ EKS cluster         →   eks-cluster-sg     →   the VPC
 | Prod approval | Reviewer approves before the job starts | plan → approve-with-plan → apply |
 | Teardown | Ordered, with sweeps | Exercise the sweeps' delete paths |
 | Upgrade readiness | `eks-upgrade` blocks on PDBs that allow no disruption and on a traffic path below two-on-two-nodes; application single replicas and PDB-less workloads are warnings, and failed probe requests a warning, unless `strict` is set | `strict` on by default, once every workload carries replicas and a PDB |
+| Workflow validation | YAML parses, but nothing checks expressions and contexts: a job-level `${{ runner.temp }}` reached `master` and invalidated `eks-upgrade` until a dispatch failed (§9) | `actionlint` as a pull-request check on `.github/` |
+| Application capacity | One NodePool, Spot first with on-demand fallback; consolidation then moves on-demand nodes onto Spot, so every application node — and the platform pods that spill onto them, gateway and CoreDNS included — runs on Spot | An on-demand base with Spot overflow: two weighted NodePools, the base capped with one node of headroom (a drift launches the replacement first — with no room it goes to Spot) and consolidated only when empty, the Spot pool consolidated when underused; applications on an HPA, with Argo CD ignoring `/spec/replicas` rather than the field leaving the Deployment, which would apply as one replica |
 | Components without a matrix | Gateway API, kube-prometheus-stack, Kiali and the AWS Load Balancer Controller publish no Kubernetes compatibility matrix; `eks-upgrade` reports them as unverified and relies on EKS upgrade insights for removed APIs | Read their release notes per upgrade |
 
 ## 13. Upgrades
+
+The procedure — inputs, steps, reading the result, what to do when a run stops — is
+`UPGRADING.md`. This section is why it is built the way it is.
 
 **The version lives in Terraform and stays there.** `kubernetes_version` drives the
 control plane, the system node group and the add-on pins. Upgrading from outside —
@@ -368,6 +380,23 @@ cancelled the first and left the pull request red. So it opens ready, and the
 fallback, should the checks ever not start, is closing and reopening it. Opening it
 needs the repository setting "Allow GitHub Actions to create and approve pull
 requests"; without it the workflow leaves a compare link in its summary.
+
+**`eks-upgrade`, step by step.** Every step before phase 1 only reads, except the
+probe, the settle and the hold, which change nothing a client would notice:
+
+| # | Step | Blocks on |
+|---|---|---|
+| 1 | Gates — tests, validate, Trivy (the deploy's own) | any failure |
+| 2 | Preflight — one minor up, cluster `ACTIVE`, EKS upgrade insights | an insight `ERROR` |
+| 3 | Compat — component matrices, against what runs | an unsupported or unverifiable component; an Application not Synced |
+| 4 | Workloads — PDBs, replicas | a PDB allowing no disruption (singles and PDB-less only with `strict`) |
+| 5 | Probe start — the bastion's loop through the ALB | a baseline that is not all 200 |
+| 6 | Traffic path, `--settle` — bootstrap leftovers restarted first | anything short of two-on-two-nodes under a PDB; an incomplete data plane |
+| 7 | Hold — Karpenter nodes `do-not-disrupt` | — |
+| 8–11 | Phases 1–4, each followed by the health gate | the gate not passing in ten minutes |
+| 12 | Verify — every node on the target, every workload and Application healthy | anything not settled in fifteen minutes |
+| 13 | Report — the probe's results per phase, in the run summary | failed requests, with `strict` |
+| 14 | Residual — a full plan, reported, never applied | — |
 
 **Phases, in the order the code already implies.** `module.eks_addons` declares
 `depends_on = [module.eks_managed-node-group]`, so a `-target` on the add-ons pulls in
@@ -486,13 +515,22 @@ warning, or fail the run with `strict` — after the fact either way, since noth
 undoes a phase; the point is that "no request failed" is a number in the summary,
 not an impression.
 
+**What the rehearsals measured** (hml, 1.35 → 1.36, three-replica app on Spot):
+
+| Run | Probe | Failed | Where |
+|---|---|---|---|
+| Before the traffic-path gate, the hold and the probe | in-cluster load generator, ~4,800 requests | 3 | phase 2: a pod started while the only istiod was being moved could not connect |
+| After them | through the ALB, 6,826 requests | 0 | — |
+
 **One cluster at a time.** hml first, verified end to end; then prod through its
 Environment's reviewer. Nothing enforces the order across accounts — prod's deploy
 role cannot see hml — so it is a procedure, written in the workflow's summary.
 
 **Resuming.** Each phase applies a saved plan, which is a no-op when there is
 nothing to do, and the preflight accepts a cluster already on the target. A run that
-stopped partway is resumed by running it again. The phases deliberately do not
+stopped partway is resumed by running it again: the probe restarts with an empty log
+(the report covers that run only), the settle and the hold are repeated, and nodes a
+failed run left held are released in phase 4 as usual. The phases deliberately do not
 branch on `-detailed-exitcode`: in CI `terraform` is setup-terraform's wrapper, which
 reports exit 2 ("changes") as 0, and the first hml upgrade skipped its control-plane
 phase that way — stopped by the version check right after it, before any node moved.
