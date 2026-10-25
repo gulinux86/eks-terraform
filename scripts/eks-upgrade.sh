@@ -7,7 +7,7 @@
 #   preflight <env> [--advisory]  version skew, cluster status, EKS upgrade insights
 #   compat <env> <minor> [--live]  every Helm-installed component supports <minor>
 #   workloads [--strict]          PDBs that would block a drain; workloads that would blink
-#   platform                      the traffic path is highly available — blocks if not
+#   platform [--settle]           the traffic path is highly available — blocks if not
 #   karpenter hold|release        keep Karpenter's nodes in place until the last phase
 #   probe start|report <env> ...  requests through the ingress ALB, from the bastion
 #   apply <env> <target>          plan -target -out, apply the saved plan if it has changes
@@ -495,8 +495,9 @@ critical_findings() {
   printf '%s\n' "${CRITICAL[@]}" | jq -R . | jq -s . >"$DIR/want" &&
     kubectl get pdb -A -o json >"$DIR/pdbs" &&
     kubectl get pods -A -o json >"$DIR/pods" &&
+    kubectl get ns -o json >"$DIR/ns" &&
     kubectl get deploy -A -o json >"$DIR/deploys" &&
-    jq -r --slurpfile want "$DIR/want" --slurpfile pdbs "$DIR/pdbs" --slurpfile pods "$DIR/pods" '
+    jq -r --slurpfile want "$DIR/want" --slurpfile pdbs "$DIR/pdbs" --slurpfile pods "$DIR/pods" --slurpfile ns "$DIR/ns" '
       def id: "\(.metadata.namespace)/\(.metadata.name)";
       def covers($labels): ((.spec.selector.matchLabels // {}) as $m
         | $m != {} and ($m | to_entries | all(. as $e | $labels[$e.key] == $e.value)));
@@ -510,13 +511,17 @@ critical_findings() {
             | select(.metadata.namespace == $d.metadata.namespace and .metadata.deletionTimestamp == null)
             | (.metadata.labels // {}) as $l
             | select($d.spec.selector.matchLabels // {} | to_entries | all(. as $e | $l[$e.key] == $e.value))
-            | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
-            | .spec.nodeName] | unique as $nodes
+            | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] as $ready
+         | [$ready[].spec.nodeName] | unique as $nodes
+         | ([$ns[0].items[] | select(.metadata.name == $d.metadata.namespace)
+             | .metadata.labels["elbv2.k8s.aws/pod-readiness-gate-inject"]] | first) as $gated
          | [$pdbs[0].items[] | select(.metadata.namespace == $d.metadata.namespace)
             | select(covers($d.spec.template.metadata.labels // {}))] as $cover
          | if $n < 2 then "\($i) — \($n) replica"
            elif ($d.status.availableReplicas // 0) < $n then "\($i) — \($d.status.availableReplicas // 0)/\($n) available"
            elif ($nodes | length) < 2 then "\($i) — every Ready replica on one node (\($nodes | join(",")))"
+           elif $gated == "enabled" and any($ready[]; (.spec.readinessGates // []) == [])
+             then "\($i) — a pod started before its ALB readiness gate could be injected"
            elif ($cover | length) == 0 then "\($i) — no PodDisruptionBudget"
            elif ([$cover[] | .status.disruptionsAllowed // 0] | max) < 1 then "\($i) — its PodDisruptionBudget allows no disruption now"
            else empty end)' "$DIR/deploys" || RC=$?
@@ -541,14 +546,36 @@ argo_findings() {
     | "application \(.metadata.name) \(.status.sync.status)/\(.status.health.status)"'
 }
 
-cmd_platform() {
-  local BAD
-  BAD=$({
+# Two findings are left by the order a new cluster comes up in, not by a wrong
+# setting, and a restart is their whole fix: replicas scheduled while only one node
+# had registered (a topology spread counts the nodes that exist, and never moves a
+# pod once placed), and gateway pods created before the TargetGroupBinding that
+# their readiness gate is injected from. Every fresh hml has had one or both.
+# --settle restarts just those Deployments — a rolling restart, under their PDB —
+# and checks again; anything else still blocks.
+SETTLEABLE='every Ready replica on one node|before its ALB readiness gate'
+
+platform_bad() {
+  {
     critical_findings || echo "could not read the traffic path's Deployments, pods and PDBs"
     dataplane_findings || echo "could not read the DaemonSets"
-  } | sed '/^$/d')
+  } | sed '/^$/d'
+}
+
+cmd_platform() {
+  local SETTLE=${1:-} BAD ID
   summary "### Traffic path"
   summary ""
+  BAD=$(platform_bad)
+  if [ -n "$BAD" ] && [ "$SETTLE" = --settle ] && grep -qE "$SETTLEABLE" <<<"$BAD"; then
+    for ID in $(grep -E "$SETTLEABLE" <<<"$BAD" | sed 's/ — .*//' | sort -u); do
+      echo "settling $ID: $(grep -F "$ID — " <<<"$BAD" | head -1 | sed 's/.* — //')"
+      kubectl -n "${ID%%/*}" rollout restart "deployment/${ID#*/}"
+      kubectl -n "${ID%%/*}" rollout status "deployment/${ID#*/}" --timeout=300s
+      summary "- Restarted \`$ID\` — $(grep -F "$ID — " <<<"$BAD" | head -1 | sed 's/.* — //')"
+    done
+    BAD=$(platform_bad)
+  fi
   if [ -z "$BAD" ]; then
     echo "traffic path: ${CRITICAL[*]} and every gateway — 2+ replicas on 2+ nodes, PDB allowing one out; data plane Ready on every node"
     summary "Gateways, ${CRITICAL[*]}: 2+ replicas on 2+ nodes, each under a PDB allowing a disruption. Node data plane Ready everywhere."

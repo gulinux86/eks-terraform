@@ -451,8 +451,17 @@ replica of any of them is an outage for every application at once; the first hml
 rehearsal lost three requests to an istiod moved mid-drain. So `platform` blocks,
 with or without `strict`, unless each runs two or more replicas, all available, Ready
 on at least two nodes, under a PDB that allows a disruption now — and the node data
-plane is complete. Gateways are found by label. For applications the preflight reads
-the cluster before anything moves:
+plane is complete. Gateways are found by label; a gateway pod in a namespace that
+asks for the ALB readiness gate must carry it.
+
+Two of those findings come from the order a new cluster comes up in, not from a
+setting, and every fresh hml had one: replicas scheduled while one node had
+registered — a topology spread counts the nodes that exist and never moves a pod
+afterwards, so CoreDNS sat twice on one node despite `DoNotSchedule` — and gateway
+pods created before the TargetGroupBinding their readiness gate is injected from.
+A restart is the whole fix, so `platform --settle` rolls just those Deployments, under
+their PDBs, while the probe is already running, and checks again; anything else still
+blocks. For applications the preflight reads the cluster before anything moves:
 
 - **Blocks:** a PDB allowing zero disruptions. EKS abandons a node group update after
   15 minutes of failed evictions; Karpenter waits indefinitely. Either way it is better

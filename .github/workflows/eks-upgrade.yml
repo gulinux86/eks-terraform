@@ -9,10 +9,11 @@ name: eks-upgrade
 #               own matrices; Applications Synced, so running = declared
 #   workloads   PDBs that would hang a drain block the run; single replicas and
 #               unprotected workloads are listed (and block with `strict`)
+#   probe       a request loop through the ingress ALB, from the bastion, until the end
 #   platform    the traffic path — gateways, CoreDNS, istiod, the Load Balancer
 #               Controller, Karpenter — is 2+ replicas on 2+ nodes under a PDB, and
-#               the node data plane is complete. Blocks, strict or not
-#   probe       a request loop through the ingress ALB, from the bastion, until the end
+#               the node data plane is complete. What a fresh cluster's bootstrap
+#               order leaves wrong is restarted first; anything else blocks
 #   hold        Karpenter's nodes marked do-not-disrupt: applications move last
 #   1/4         control plane                 — no pod moves
 #   2/4         system node group             — EKS rolls it: new node first, then
@@ -129,14 +130,17 @@ jobs:
       - name: Workload readiness — what a node roll will disrupt
         run: ./scripts/eks-upgrade.sh workloads ${STRICT:+"$STRICT"}
 
-      # Blocking regardless of `strict`: every application depends on these at once.
-      - name: Traffic path — redundant before anything moves
-        run: ./scripts/eks-upgrade.sh platform
-
+      # Before `platform`, so the restarts it may make are measured too.
       - name: Start the availability probe
         id: probe
         if: env.PROBE_PATH != ''
         run: ./scripts/eks-upgrade.sh probe start "$ENVIRONMENT" "$PROBE_PATH"
+
+      # Blocking regardless of `strict`: every application depends on these at once.
+      - name: Traffic path — redundant before anything moves
+        run: |
+          echo "$(date +%s) traffic path settle" >>"$MARKS"
+          ./scripts/eks-upgrade.sh platform --settle
 
       # Applications last. The control plane's new minor drifts every Karpenter node
       # at once (see `karpenter` in the script); held, they wait for phase 4.
