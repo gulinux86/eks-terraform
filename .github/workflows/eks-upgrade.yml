@@ -19,8 +19,10 @@ name: eks-upgrade
 #   2/4         system node group             — EKS rolls it: new node first, then
 #                                               cordon, drain against PDBs, terminate
 #   3/4         add-ons                       — after the nodes, as depends_on says
-#   4/4         Karpenter nodes               — released; drift replaces them, one at
-#                                               a time (NodePool budget)
+#   4/4         Karpenter nodes               — once every EC2NodeClass resolved an image
+#                                               for the new minor, released; drift
+#                                               replaces them, one at a time (NodePool
+#                                               budget)
 #   verify      every node on the new minor, every workload and Application healthy
 #   report      the probe's results, per phase, in the run summary
 #
@@ -193,6 +195,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "$(date +%s) 4/4 Karpenter nodes" >>"$RUNNER_TEMP/phase-marks"
+          ./scripts/eks-upgrade.sh ami "$TARGET" 900
           ./scripts/eks-upgrade.sh karpenter release
           ./scripts/eks-upgrade.sh nodes karpenter.sh/nodepool "$TARGET" 3600
           ./scripts/eks-upgrade.sh health "$ENVIRONMENT" 600
