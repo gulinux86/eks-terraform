@@ -20,14 +20,14 @@ cidr_block   = "10.0.0.0/16"
 # Every version is pinned. Unpinned, each resolves to whatever is newest at apply
 # time, so two applies months apart install different software with no diff in
 # the code.
-kubernetes_version = "1.36"
+kubernetes_version = "1.35"
 
-vpc_cni_version            = "v1.22.4-eksbuild.8"
-coredns_version            = "v1.14.7-eksbuild.19"
-kube_proxy_version         = "v1.36.0-eksbuild.55"
-metrics_server_version     = "v0.9.0-eksbuild.14"
-ebs_csi_version            = "v1.67.2-eksbuild.1"
-pod_identity_agent_version = "v1.4.1-eksbuild.2"
+vpc_cni_version            = "v1.22.4-eksbuild.3"
+coredns_version            = "v1.13.2-eksbuild.11"
+kube_proxy_version         = "v1.35.3-eksbuild.18"
+metrics_server_version     = "v0.9.0-eksbuild.6"
+ebs_csi_version            = "v1.64.0-eksbuild.1"
+pod_identity_agent_version = "v1.4.0-eksbuild.1"
 
 # --- Compute ------------------------------------------------------------------
 # Node sizing is driven by the VPC CNI's pod-per-node cap, which comes from ENI
