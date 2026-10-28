@@ -409,7 +409,7 @@ workflow adds a saved, targeted plan per phase and a check after each one.
 | Control plane | Nothing — EKS replaces API servers; pods keep running | Cluster `ACTIVE`, reports the target version |
 | System node group | EKS: a new node first, then cordon, drain against PDBs, terminate — `max_unavailable = 1` | Every node group node on the target and Ready |
 | Add-ons | Rolling updates of their own DaemonSets/Deployments | Every add-on `ACTIVE` |
-| Karpenter nodes | Karpenter's drift, released only now (below), replacing nodes at the NodePool budget (`nodes: "1"`) | Every `karpenter.sh/nodepool` node on the target and Ready |
+| Karpenter nodes | Karpenter's drift, released only now (below) — once every EC2NodeClass has resolved an image for the target — replacing nodes at the NodePool budget (`nodes: "1"`) | Every `karpenter.sh/nodepool` node on the target and Ready |
 
 After each phase a **health gate** waits — up to ten minutes, then stops the run —
 until every node is Ready and schedulable, the per-node data plane (CNI, kube-proxy,
@@ -432,6 +432,16 @@ It is set on the Node, not the NodePool, so Git does not change and Argo CD has
 nothing to revert; a label records which nodes the run marked, so an annotation set by
 hand survives the release. A failed run leaves them held — its resume should not find
 them moving — and says so.
+
+The release waits for the image first. Drift launches each replacement from what the
+EC2NodeClass resolved, and Karpenter re-resolves every five minutes, not when the
+control plane moves. Released too early, nodes would be replaced with the old minor's
+image and the wait for the target would time out an hour later; if the alias has no
+image for the minor (a pinned release older than it), the NodeClass resolves nothing
+and no node can launch at all. `eks-upgrade.sh ami` waits up to fifteen minutes for
+every EC2NodeClass to report `AMIsReady` with images named for the target
+(`amazon-eks-node-al2023-x86_64-standard-<minor>-v<release>`) and stops the run with
+the nodes still held otherwise.
 
 **No `kubectl drain`, and no uncordon.** Both node owners already surge, cordon and
 drain against PDBs; a drain from the pipeline would race them. And EKS replaces

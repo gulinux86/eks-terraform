@@ -80,7 +80,7 @@ Durations are from the hml 1.35 → 1.36 run (about 25 minutes after the gates).
 | 8 | **1/4 Control plane** + health gate | ~8 min | the version is not the target; the gate does not pass in 10 min |
 | 9 | **2/4 System node group** + health gate | ~9 min | a node does not reach the target in 15 min; the gate does not pass |
 | 10 | **3/4 Add-ons** + health gate | ~1–2 min | an add-on is not `ACTIVE`; the gate does not pass |
-| 11 | **4/4 Karpenter nodes** — released, drift replaces them one at a time | ~5 min for three nodes | a node does not reach the target in 60 min; the gate does not pass |
+| 11 | **4/4 Karpenter nodes** — once every EC2NodeClass resolved an image for the target, released; drift replaces them one at a time | ~5 min for three nodes | no image for the target in 15 min; a node does not reach the target in 60 min; the gate does not pass |
 | 12 | Verify | seconds | a node, Deployment, StatefulSet or Application has not settled in 15 min |
 | 13 | Availability report | seconds | requests failed, with `strict` |
 | 14 | Residual changes | seconds | never — it reports what `terraform-deploy` would still change |
@@ -142,6 +142,7 @@ lines up with the step log to find what moved then.
 | A phase | `control plane reports X, expected Y` | Read the phase's plan output; rerun — a saved, empty plan is a no-op |
 | System node group | the node group update failed | Usually a PDB that would not let a pod go for 15 minutes. Find it (`kubectl get pdb -A`), fix it, rerun |
 | Health gate | `the cluster did not recover within 600s` | Its last lines list what was still wrong. Fix it, rerun |
+| Karpenter nodes | `Karpenter did not resolve a <minor> image` | The nodes are still held, nothing moved. `kubectl describe ec2nodeclass`: `AMIsReady False` with `AMISelector did not match any AMIs` means the alias has no image for the minor — a pinned `al2023@v<release>` older than it; move the pin in platform-gitops, let Argo CD sync, rerun. An image still named for the old minor means Karpenter had not re-resolved yet; rerun |
 | After any failure | `Karpenter node(s) still marked do-not-disrupt` | Expected — rerunning finishes the upgrade and releases them. To abandon instead: `./scripts/eks-upgrade.sh karpenter release` |
 
 **Resuming is running it again.** Each phase applies a saved plan, a no-op when
@@ -164,9 +165,10 @@ live cluster with a kubeconfig and AWS credentials:
 ./scripts/eks-upgrade.sh probe start hml /sim/    # start the bastion probe
 ./scripts/eks-upgrade.sh probe report hml marks   # stop it; marks: "<epoch> <label>" per line
 ./scripts/eks-upgrade.sh karpenter hold|release
+./scripts/eks-upgrade.sh ami 1.37 0               # Karpenter's NodeClasses resolve a 1.37 image — once
 ```
 
-`platform`, `health`, `compat` and `workloads` only read. `probe start` leaves a
+`platform`, `health`, `ami`, `compat` and `workloads` only read. `probe start` leaves a
 systemd unit (`eks-upgrade-probe`) running on the bastion until `probe report` stops
 it, or four hours pass.
 

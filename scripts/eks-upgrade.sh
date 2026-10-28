@@ -9,6 +9,7 @@
 #   workloads [--strict]          PDBs that would block a drain; workloads that would blink
 #   platform [--settle]           the traffic path is highly available — blocks if not
 #   karpenter hold|release        keep Karpenter's nodes in place until the last phase
+#   ami <minor> <seconds>         wait until Karpenter's NodeClasses resolve a <minor> image
 #   probe start|report <env> ...  requests through the ingress ALB, from the bastion
 #   apply <env> <target>          plan -target -out, apply the saved plan if it has changes
 #   nodes <selector> <minor> <s>  wait until every matching node runs <minor> and is Ready
@@ -627,6 +628,48 @@ cmd_karpenter() {
   esac
 }
 
+# --- ami ----------------------------------------------------------------------
+# Before Karpenter's nodes are released: every EC2NodeClass has resolved an image
+# for the new minor. Drift launches the replacement from whatever the NodeClass
+# resolved — still the old minor's image if Karpenter has not re-read the control
+# plane yet (it re-resolves every 5 minutes), so the nodes would roll for nothing
+# and `nodes` would time out an hour later; or no image at all if the alias has
+# none for the minor, and then the cluster cannot launch a node.
+#
+# The alias lookup carries the control plane's minor in its SSM path, pinned
+# (`al2023@v<release>`) or not (`@latest`) — Karpenter 1.13,
+# pkg/providers/amifamily/al2023.go, resolvePath:
+#   /aws/service/eks/optimized-ami/<minor>/amazon-linux-2023/<arch>/<variant>/...
+# so the image it resolves is named for the minor, which is what is checked here:
+#   amazon-eks-node-al2023-x86_64-standard-1.36-v20261019
+# A NodeClass selecting images by ID or tag carries no such name; for it only
+# AMIsReady is checked.
+cmd_ami() {
+  local TARGET=${1:?usage: ami <minor> <timeout s>} TIMEOUT=${2:?usage: ami <minor> <timeout s>}
+  local DEADLINE=$((SECONDS + TIMEOUT)) BAD
+  while :; do
+    BAD=$(kubectl get ec2nodeclasses -o json | jq -r --arg t "$TARGET" '.items[] | .metadata.name as $n
+      | (first(.status.conditions[]? | select(.type == "AMIsReady")) // {status: "Unknown", message: "no condition yet"}) as $c
+      | if $c.status != "True" then "EC2NodeClass \($n): AMIsReady \($c.status) — \($c.message // "")"
+        elif ((.status.amis // []) | length) == 0 then "EC2NodeClass \($n): no image resolved"
+        elif any(.spec.amiSelectorTerms[]?; .alias) then
+          (.status.amis[] | select(.name | contains("-\($t)-") | not)
+            | "EC2NodeClass \($n): \(.id) \(.name) is not a \($t) image")
+        else empty end') || BAD="could not read the EC2NodeClasses"
+    if [ -z "$BAD" ]; then
+      echo "every EC2NodeClass resolved a $TARGET image:"
+      kubectl get ec2nodeclasses -o json | jq -r '.items[] | .metadata.name as $n | .status.amis[] | "  \($n)\t\(.id)\t\(.name)"' | sort -u
+      return 0
+    fi
+    if [ $SECONDS -ge $DEADLINE ]; then
+      while read -r L; do echo "::error::$L"; done <<<"$BAD"
+      die "Karpenter did not resolve a $TARGET image within ${TIMEOUT}s — releasing its nodes would replace them with nothing better. kubectl describe ec2nodeclass"
+    fi
+    echo "$(date +%T) waiting on $(wc -l <<<"$BAD") item(s), e.g. $(head -1 <<<"$BAD")"
+    sleep 30
+  done
+}
+
 # --- probe --------------------------------------------------------------------
 # Availability measured, not inferred: a loop on the bastion requesting <path>
 # through the internal ingress ALB, five times a second, for the whole upgrade.
@@ -868,10 +911,11 @@ case "$CMD" in
   workloads) cmd_workloads "$@" ;;
   platform) cmd_platform "$@" ;;
   karpenter) cmd_karpenter "$@" ;;
+  ami) cmd_ami "$@" ;;
   probe) cmd_probe "$@" ;;
   apply) cmd_apply "$@" ;;
   nodes) cmd_nodes "$@" ;;
   health) cmd_health "$@" ;;
   verify) cmd_verify "$@" ;;
-  *) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
