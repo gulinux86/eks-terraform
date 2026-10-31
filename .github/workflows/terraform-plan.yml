@@ -114,12 +114,12 @@ jobs:
             # scripts/check-layer-contract.sh derives it, so a new consumer needs no
             # change here.
             MISSING=""
-            for NAME in $(grep -rhoE 'terraform_remote_state\.foundation\.outputs\.[a-zA-Z0-9_]+' \
-                          --include='*.tf' workload \
-                          | sed -E 's/.*\.outputs\.//' | sort -u); do
+            while read -r NAME; do
               printf '%s' "$STATE" | jq -e --arg n "$NAME" '.outputs[$n]' >/dev/null 2>&1 \
                 || MISSING="$MISSING $NAME"
-            done
+            done < <(grep -rhoE 'terraform_remote_state\.foundation\.outputs\.[a-zA-Z0-9_]+' \
+                       --include='*.tf' workload \
+                       | sed -E 's/.*\.outputs\.//' | sort -u)
 
             if [ -n "$MISSING" ]; then
               {

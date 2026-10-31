@@ -139,6 +139,7 @@ refuses to overwrite an existing branch.
 | `terraform-test` | PR, dispatch | `terraform test` on every module with a `tests/` directory — mocked, no credentials |
 | `security-scan` | PR, dispatch | Trivy IaC scan; fails on HIGH/CRITICAL |
 | `terraform-docs` | PR, dispatch | Fails when a README between the `BEGIN_TF_DOCS` markers is out of date |
+| `lint` | PR, dispatch | actionlint on the workflows (expressions, contexts, and shellcheck on every `run:` block) and shellcheck on every tracked `*.sh` |
 | `terraform-deploy` | dispatch (env + layer) | Gated on tests, validate and Trivy, then `plan -out` → `apply tfplan` |
 | `terraform-destroy` | dispatch (env + layer + typed confirm) | Ordered teardown (§11) |
 | `eks-upgrade-pr` | dispatch (target minor) | Bumps the Kubernetes version and the six add-on pins in hml and prod, checks Karpenter, Istio, cert-manager and Argo CD support it; pushes a branch and opens the PR (§13) |
@@ -186,7 +187,7 @@ workload/      same shape
                modules/{aws-load-balancer-controller,platform-ingress,
                         storage,argocd,argocd-bootstrap}/
 scripts/       check-layer-contract.sh · eks-upgrade.sh
-.github/       plan · test · security-scan · docs · deploy · destroy ·
+.github/       plan · test · security-scan · docs · lint · deploy · destroy ·
                eks-upgrade-pr · eks-upgrade
 .trivyignore   accepted exceptions — each needs a written reason
 UPGRADING.md   the EKS upgrade runbook
