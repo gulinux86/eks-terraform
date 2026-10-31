@@ -575,12 +575,12 @@ cmd_platform() {
   summary ""
   BAD=$(platform_bad)
   if [ -n "$BAD" ] && [ "$SETTLE" = --settle ] && grep -qE "$SETTLEABLE" <<<"$BAD"; then
-    for ID in $(grep -E "$SETTLEABLE" <<<"$BAD" | sed 's/ — .*//' | sort -u); do
+    while read -r ID; do
       echo "settling $ID: $(grep -F "$ID — " <<<"$BAD" | head -1 | sed 's/.* — //')"
-      kubectl -n "${ID%%/*}" rollout restart "deployment/${ID#*/}"
-      kubectl -n "${ID%%/*}" rollout status "deployment/${ID#*/}" --timeout=300s
+      kubectl -n "${ID%%/*}" rollout restart "deployment/${ID#*/}" </dev/null
+      kubectl -n "${ID%%/*}" rollout status "deployment/${ID#*/}" --timeout=300s </dev/null
       summary "- Restarted \`$ID\` — $(grep -F "$ID — " <<<"$BAD" | head -1 | sed 's/.* — //')"
-    done
+    done < <(grep -E "$SETTLEABLE" <<<"$BAD" | sed 's/ — .*//' | sort -u)
     BAD=$(platform_bad)
   fi
   if [ -z "$BAD" ]; then

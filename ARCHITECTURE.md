@@ -252,9 +252,10 @@ Delivered by Argo CD (waves 9 and 10), not as an AWS add-on.
     `runner` context is available inside steps but not in a job's `env`, and
     `${{ runner.temp }}` there made `eks-upgrade` invalid as a whole — every dispatch a
     `startup_failure`, and every push to `master` a failed run named after the file
-    path. YAML parsing passes it; only GitHub's own validation (or `actionlint`)
-    catches it, and nothing in CI runs that yet (§12). Inside a step the shell
-    variable (`$RUNNER_TEMP`) is the reliable form.
+    path. YAML parsing passes it; GitHub's own validation catches it, too late, and
+    so does `actionlint`, which the `lint` workflow now runs on every pull request
+    touching a workflow or a shell script. Inside a step the shell variable
+    (`$RUNNER_TEMP`) is the reliable form.
 - **AWS auth is one composite action**, in [`ci-templates`](https://github.com/gulinux86/ci-templates),
   pinned by commit SHA. A tag is mutable: whoever controls that repository could
   repoint it and every consumer would run different code with no diff
@@ -348,7 +349,6 @@ EKS cluster         →   eks-cluster-sg     →   the VPC
 | Prod approval | Reviewer approves before the job starts | plan → approve-with-plan → apply |
 | Teardown | Ordered, with sweeps | Exercise the sweeps' delete paths |
 | Upgrade readiness | `eks-upgrade` blocks on PDBs that allow no disruption and on a traffic path below two-on-two-nodes; application single replicas and PDB-less workloads are warnings, and failed probe requests a warning, unless `strict` is set | `strict` on by default, once every workload carries replicas and a PDB |
-| Workflow validation | YAML parses, but nothing checks expressions and contexts: a job-level `${{ runner.temp }}` reached `master` and invalidated `eks-upgrade` until a dispatch failed (§9) | `actionlint` as a pull-request check on `.github/` |
 | Application capacity | One NodePool, Spot first with on-demand fallback; consolidation then moves on-demand nodes onto Spot, so every application node — and the platform pods that spill onto them, gateway and CoreDNS included — runs on Spot | An on-demand base with Spot overflow: two weighted NodePools, the base capped with one node of headroom (a drift launches the replacement first — with no room it goes to Spot) and consolidated only when empty, the Spot pool consolidated when underused; applications on an HPA, with Argo CD ignoring `/spec/replicas` rather than the field leaving the Deployment, which would apply as one replica |
 | Components without a matrix | Gateway API, kube-prometheus-stack, Kiali and the AWS Load Balancer Controller publish no Kubernetes compatibility matrix; `eks-upgrade` reports them as unverified and relies on EKS upgrade insights for removed APIs | Read their release notes per upgrade |
 
