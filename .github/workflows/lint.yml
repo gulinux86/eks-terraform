@@ -1,0 +1,78 @@
+# Fails a pull request whose workflows GitHub would reject, or whose shell scripts
+# shellcheck flags.
+#
+# YAML-valid is not workflow-valid. `${{ runner.temp }}` in a job's `env` parsed
+# fine, reached master, and made eks-upgrade invalid as a whole: every dispatch a
+# startup_failure, every push a failed run named after the file (ARCHITECTURE.md §9).
+# actionlint checks expressions against the contexts available where they are used,
+# which is exactly that mistake.
+#
+# shellcheck runs twice over: on scripts/ directly, and — because actionlint calls it
+# when it is on PATH — on every `run:` block. scripts/eks-upgrade.sh is the code that
+# moves a live cluster, and had never been linted in CI.
+name: lint
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [master, develop, main]
+    paths:
+      - ".github/workflows/**"
+      - "**.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned with their checksums — actionlint's from the release's checksums file,
+  # shellcheck's from the release asset's digest. Bump each version with its sum.
+  ACTIONLINT_VERSION: 1.7.12
+  ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+  SHELLCHECK_VERSION: v0.11.0
+  SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      # The runner image ships a shellcheck of its own; installing a pinned one over
+      # it means a runner image update cannot change what fails here.
+      - name: Install shellcheck
+        run: |
+          set -euo pipefail
+          TARBALL="shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -sSLo "/tmp/$TARBALL" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/${TARBALL}"
+          echo "${SHELLCHECK_SHA256}  /tmp/${TARBALL}" | sha256sum -c -
+          tar -xJf "/tmp/$TARBALL" -C /tmp
+          sudo install "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          TARBALL="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -sSLo "/tmp/$TARBALL" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${TARBALL}"
+          echo "${ACTIONLINT_SHA256}  /tmp/${TARBALL}" | sha256sum -c -
+          tar -xzf "/tmp/$TARBALL" -C /tmp actionlint
+          sudo install /tmp/actionlint /usr/local/bin/actionlint
+          actionlint -version
+
+      # Every tracked shell script, discovered rather than listed.
+      - name: shellcheck — scripts
+        run: |
+          set -euo pipefail
+          mapfile -t SCRIPTS < <(git ls-files '*.sh')
+          printf '%s\n' "${SCRIPTS[@]}"
+          shellcheck "${SCRIPTS[@]}"
+
+      - name: actionlint — workflows, and shellcheck on their run blocks
+        run: actionlint -color
