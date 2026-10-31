@@ -299,7 +299,7 @@ EKS cluster         →   eks-cluster-sg     →   the VPC
 
 | Step | Why here |
 |---|---|
-| Drain cluster-owned state | Freezes `syncPolicy.automated` first — `selfHeal` reads a deletion as an instruction to recreate. Deletes Karpenter `NodePool`s **before** the Applications, since deleting one is a request to Karpenter. Strips finalizers, which would hang the Helm uninstall. |
+| Drain cluster-owned state | Freezes `syncPolicy.automated` first — `selfHeal` reads a deletion as an instruction to recreate — parents (`root`, `tenants`) before children and repeated until none is left automated, because a parent still automated restores its children from git. Deletes Karpenter `NodePool`s **before** the Applications, since deleting one is a request to Karpenter. Strips finalizers, which would hang the Helm uninstall, then deletes any NodePool that came back, since a stripped Application leaves its resources behind. |
 | Terminate Karpenter instances | Its own step, **not** gated on a live cluster — it works from AWS tags, and the case that matters is the one where the cluster is gone. On the normal path it finds nothing, which is the signal the ordering is right. |
 | Destroy workload | Removes the ALB, which is why the preflight follows it. |
 | Preflight | Fails in seconds on anything unowned, rather than as a `DependencyViolation` forty minutes in. |
