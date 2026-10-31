@@ -380,7 +380,7 @@ jobs:
           }
           if [ -n "$SGS" ]; then
             echo "  BLOCKING security groups Terraform does not own:" >&2
-            sed 's/^/    /' <<<"$SGS" >&2
+            while read -r SG; do echo "    $SG"; done <<<"$SGS" >&2
             FAIL=1
           fi
 
