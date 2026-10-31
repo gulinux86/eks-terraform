@@ -513,6 +513,15 @@ What makes a workload pass: 2+ replicas, a PDB (`minAvailable: 1` or
 `maxUnavailable: 1`), a readiness probe, `topologySpreadConstraints` across nodes, and
 a `preStop` delay long enough for the ALB to deregister the target.
 
+"Long enough" is longer than it looks. Deregistering is the Load Balancer Controller's
+job, and the controller runs on the system node group: when a drain takes its leader,
+nothing deregisters anything until a new leader holds the lease — 21 seconds,
+measured. A gateway pod on the same node, drained in the same moment, stopped at the
+end of a 15-second sleep and the ALB sent requests to it until then. So the gateway
+(platform-gitops) runs only on Karpenter's nodes, which move in phase 4 after the
+controller has settled, and sleeps 40 seconds; an application behind an ALB of its
+own needs the same margin.
+
 **Availability is measured, not inferred.** For the whole run a loop on the bastion
 requests a path (`probe-path`, default `/sim/`) through the internal ingress ALB, five
 times a second. The bastion because it is the one host no phase replaces — a probe pod
@@ -531,6 +540,7 @@ not an impression.
 |---|---|---|---|
 | Before the traffic-path gate, the hold and the probe | in-cluster load generator, ~4,800 requests | 3 | phase 2: a pod started while the only istiod was being moved could not connect |
 | After them | through the ALB, 6,826 requests | 0 | — |
+| Second run, 2026-10-31 | through the ALB, 7,676 requests | 3 | phase 2: a gateway pod drained with the Load Balancer Controller's leader on the same system node; nothing deregistered it for 21s, past its 15s `preStop`. Fixed by keeping the gateway on Karpenter's nodes with a 40s `preStop` |
 
 **One cluster at a time.** hml first, verified end to end; then prod through its
 Environment's reviewer. Nothing enforces the order across accounts — prod's deploy
