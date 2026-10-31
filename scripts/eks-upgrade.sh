@@ -193,6 +193,12 @@ cmd_preflight() {
     INSIGHTS=$(aws eks list-insights --region "$REGION" --cluster-name "$CLUSTER" --output json \
       --filter "{\"categories\":[\"UPGRADE_READINESS\"],\"kubernetesVersions\":[\"$TARGET\"]}")
     jq -r '.insights[] | "  \(.insightStatus.status)\t\(.name)"' <<<"$INSIGHTS"
+    # None at all is not "none failed". EKS scans a new cluster some time after it is
+    # created — a fresh hml had none half an hour in — and an empty list would pass
+    # the ERROR check below without anything having been checked.
+    if jq -e '.insights | length == 0' <<<"$INSIGHTS" >/dev/null; then
+      warn "EKS has not scanned $CLUSTER for $TARGET yet: no upgrade insights were checked. A cluster created recently gets them later; rerun to have them read."
+    fi
     jq -r '.insights[] | select(.insightStatus.status == "WARNING") | "::warning::insight: \(.name) — \(.insightStatus.reason)"' <<<"$INSIGHTS"
     if jq -e '[.insights[] | select(.insightStatus.status == "ERROR")] | length > 0' <<<"$INSIGHTS" >/dev/null; then
       jq -r '.insights[] | select(.insightStatus.status == "ERROR") | "::error::insight: \(.name) — \(.insightStatus.reason)"' <<<"$INSIGHTS"
