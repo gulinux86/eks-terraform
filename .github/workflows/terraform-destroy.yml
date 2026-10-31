@@ -134,10 +134,26 @@ jobs:
           # is the correct instrument — NOT scaling argocd-application-controller to
           # zero, which is the obvious move and the wrong one: the same controller
           # processes finalizers, so a deletion afterwards hangs forever.
+          #
+          # Parents first, then check. `root` and `tenants` manage other
+          # Applications with selfHeal, so a child frozen while its parent is still
+          # automated is put back to automated from git. Alphabetical order froze
+          # karpenter-nodes two seconds before root; root restored it, it recreated
+          # the NodePool deleted below, and Karpenter launched nodes that outlived
+          # the cluster and held a subnet (run 41240377849).
           echo "::group::freezing Argo CD automation"
-          for APP in $(kubectl get applications -n argocd -o name 2>/dev/null); do
-            kubectl patch "$APP" -n argocd --type merge \
-              -p '{"spec":{"syncPolicy":{"automated":null}}}' || true
+          for TRY in 1 2 3 4 5; do
+            AUTOMATED=$(kubectl get applications -n argocd -o json 2>/dev/null | jq -r '.items
+              | map(select(.spec.syncPolicy.automated != null))
+              | sort_by(any(.status.resources[]?; .kind == "Application") | not)
+              | .[].metadata.name')
+            [ -z "$AUTOMATED" ] && { echo "  no Application left automated"; break; }
+            [ "$TRY" = 5 ] && { echo "::warning::still automated after 5 passes: $AUTOMATED"; break; }
+            while read -r APP; do
+              kubectl patch application "$APP" -n argocd --type merge \
+                -p '{"spec":{"syncPolicy":{"automated":null}}}' || true
+            done <<<"$AUTOMATED"
+            sleep 10
           done
           echo "::endgroup::"
 
@@ -188,6 +204,17 @@ jobs:
                 -p '{"metadata":{"finalizers":null}}' || true
             done
             kubectl delete applications --all -n argocd --timeout=2m || true
+            echo "::endgroup::"
+          fi
+
+          # Stripping a finalizer deletes the Application without its resources, so
+          # a NodePool that came back before the freeze took hold survives it — and
+          # Karpenter, whose Application was stripped the same way, is still running
+          # to act on it. Delete again while that controller can still drain.
+          if kubectl get nodepools -o name 2>/dev/null | grep -q .; then
+            echo "::group::deleting NodePools that came back"
+            kubectl get nodepools -o name
+            kubectl delete nodepools --all --timeout=10m || true
             echo "::endgroup::"
           fi
 
