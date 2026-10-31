@@ -71,7 +71,7 @@ Durations are from the hml 1.35 → 1.36 run (about 25 minutes after the gates).
 | # | Step | Takes | Stops the run when |
 |---|---|---|---|
 | 1 | Gates — tests, validate, Trivy | 1–2 min | any fails |
-| 2 | Preflight — one minor up, cluster `ACTIVE`, upgrade insights | seconds | an insight reports `ERROR` |
+| 2 | Preflight — one minor up, cluster `ACTIVE`, upgrade insights | seconds | an insight reports `ERROR`. None yet — a cluster created in the last hour or so — is a warning: nothing was checked |
 | 3 | Components support the target, against what runs | seconds | a component is unsupported or cannot be verified; an Application is not Synced/Healthy |
 | 4 | Workload readiness | seconds | a PDB allows no disruption (single replicas and PDB-less workloads only with `strict`) |
 | 5 | Start the availability probe | ~30 s | the baseline is not all `200` |

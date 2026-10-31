@@ -541,6 +541,7 @@ not an impression.
 | Before the traffic-path gate, the hold and the probe | in-cluster load generator, ~4,800 requests | 3 | phase 2: a pod started while the only istiod was being moved could not connect |
 | After them | through the ALB, 6,826 requests | 0 | — |
 | Second run, 2026-10-31 | through the ALB, 7,676 requests | 3 | phase 2: a gateway pod drained with the Load Balancer Controller's leader on the same system node; nothing deregistered it for 21s, past its 15s `preStop`. Fixed by keeping the gateway on Karpenter's nodes with a 40s `preStop` |
+| With that fix, 2026-10-31 | through the ALB, 7,113 requests | 0 | — the system node group rolled with the controller on it and the gateway held on Karpenter's nodes until phase 4 |
 
 **One cluster at a time.** hml first, verified end to end; then prod through its
 Environment's reviewer. Nothing enforces the order across accounts — prod's deploy
