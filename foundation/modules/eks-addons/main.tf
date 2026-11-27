@@ -41,9 +41,27 @@ locals {
 # hml: both on one system node as it was cordoned. A hard spread on hostname rules
 # it out; the zone spread is EKS's own default, restated because this list replaces
 # it rather than adding to it.
+#
+# Scaling is EKS's managed autoscaler, not an HPA. DNS load follows the cluster's
+# size — more nodes, more pods resolving names — rather than CoreDNS's own CPU, which
+# stays low until it is already dropping queries. The autoscaler targets one replica
+# per a number of nodes or CPU cores (EKS's defaults for both), never below
+# minReplicas. An HPA here would fight the add-on, which owns the Deployment.
+#
+# The PDB is the add-on's managed one, on by default; stated so it reads as a
+# decision, and so turning it off is a visible diff.
 locals {
   addon_configuration = {
     "coredns" = jsonencode({
+      autoScaling = {
+        enabled     = true
+        minReplicas = 2
+        maxReplicas = 6
+      }
+      podDisruptionBudget = {
+        enabled        = true
+        maxUnavailable = 1
+      }
       topologySpreadConstraints = [
         {
           maxSkew           = 1

@@ -60,15 +60,32 @@ resource "helm_release" "eks_helm_controller" {
     value = "1"
   }
 
+  # Hostname, hard, for the reason above. Zone, soft: one replica per zone survives losing a zone, but a hard zone spread
+  # would leave the replacement Pending in that very outage — the lost zone's nodes
+  # still count as a domain until deleted. The standby in the surviving zone takes
+  # the lease either way; this only decides where the second replica goes.
+  #
+  # No HPA: a leader-elected controller does its work in one replica; more would be
+  # more standbys, not more throughput.
   values = [yamlencode({
-    topologySpreadConstraints = [{
-      maxSkew           = 1
-      topologyKey       = "kubernetes.io/hostname"
-      whenUnsatisfiable = "DoNotSchedule"
-      labelSelector = {
-        matchLabels = { "app.kubernetes.io/name" = "aws-load-balancer-controller" }
-      }
-    }]
+    topologySpreadConstraints = [
+      {
+        maxSkew           = 1
+        topologyKey       = "kubernetes.io/hostname"
+        whenUnsatisfiable = "DoNotSchedule"
+        labelSelector = {
+          matchLabels = { "app.kubernetes.io/name" = "aws-load-balancer-controller" }
+        }
+      },
+      {
+        maxSkew           = 1
+        topologyKey       = "topology.kubernetes.io/zone"
+        whenUnsatisfiable = "ScheduleAnyway"
+        labelSelector = {
+          matchLabels = { "app.kubernetes.io/name" = "aws-load-balancer-controller" }
+        }
+      },
+    ]
   })]
 
   set {

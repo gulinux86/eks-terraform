@@ -109,3 +109,24 @@ run "coredns_spread_across_nodes" {
     error_message = "coredns must be spread across nodes with whenUnsatisfiable = DoNotSchedule"
   }
 }
+
+run "coredns_scales_and_keeps_two" {
+  command = plan
+
+  # EKS's managed autoscaler sizes CoreDNS to the cluster; its floor is what keeps a
+  # drain from leaving DNS on one replica, so it must stay at two or more.
+  assert {
+    condition     = jsondecode(aws_eks_addon.this["coredns"].configuration_values).autoScaling.enabled
+    error_message = "coredns must use the add-on's managed autoscaling"
+  }
+
+  assert {
+    condition     = jsondecode(aws_eks_addon.this["coredns"].configuration_values).autoScaling.minReplicas >= 2
+    error_message = "coredns autoscaling must never scale below two replicas"
+  }
+
+  assert {
+    condition     = jsondecode(aws_eks_addon.this["coredns"].configuration_values).podDisruptionBudget.enabled
+    error_message = "coredns must keep the add-on's managed PodDisruptionBudget"
+  }
+}
