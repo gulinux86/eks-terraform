@@ -59,3 +59,27 @@ variable "tags" {
     Layer     = "bootstrap"
   }
 }
+
+variable "ecr_push_repositories" {
+  type        = list(string)
+  description = "Repositories whose default-branch release workflow may push images to apps/* in ECR, as owner/name. A trailing * matches every repository of the owner. Pull requests never get the push role."
+  default     = ["gulinux86/*"]
+}
+
+variable "ecr_push_role_name" {
+  type        = string
+  description = "Name of the role application release workflows push to ECR with"
+  default     = "github-actions-ecr-push"
+}
+
+variable "gitops_repository" {
+  type        = string
+  description = "The application GitOps repository, as owner/name. Its CI reads the images its values files pin."
+  default     = "gulinux86/app-gitops"
+}
+
+variable "ecr_read_role_name" {
+  type        = string
+  description = "Name of the read-only role app-gitops' CI reads images with"
+  default     = "github-actions-ecr-read"
+}
