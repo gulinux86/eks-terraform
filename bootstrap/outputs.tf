@@ -17,3 +17,18 @@ output "state_bucket" {
   value       = aws_s3_bucket.state.id
   description = "S3 bucket holding the foundation/workload remote state"
 }
+
+output "ecr_push_role_arn" {
+  value       = aws_iam_role.ecr_push.arn
+  description = "ARN of the ECR push role. Set as the ECR_PUSH_ROLE_ARN secret in each application repository that uses ci-templates' service-release workflow."
+}
+
+output "ecr_read_role_arn" {
+  value       = aws_iam_role.ecr_read.arn
+  description = "ARN of the ECR read role. Set as the ECR_READ_ROLE_ARN secret in app-gitops."
+}
+
+output "ecr_registry" {
+  value       = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
+  description = "The account's ECR registry. Images are <registry>/apps/<app>[/<service>]."
+}
