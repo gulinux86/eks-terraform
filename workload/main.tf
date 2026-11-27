@@ -46,19 +46,18 @@ module "platform_ingress" {
   depends_on = [module.eks_aws_load_balancer_controller]
 }
 
-# One IAM role per tenant that reads secrets, for the External Secrets Operator.
+# The External Secrets Operator's AWS identity: one role, via Pod Identity, reading
+# apps/* in Secrets Manager for every application.
 #
-# The operator in platform-gitops has no AWS identity; each tenant's SecretStore
-# assumes its own role here, which trusts only that namespace's ServiceAccount and
-# reads only that application's prefix. The list mirrors the tenants with
-# `secrets: true` in platform-gitops' tenants/registry/ — a tenant there without a
-# role here has a SecretStore that never becomes Ready.
-module "tenant_secrets" {
-  source       = "./modules/tenant-secrets"
+# One role rather than one per application, so admitting an application is a change
+# in platform-gitops and never an apply here. What keeps applications out of each
+# other's secrets is an admission policy in platform-gitops
+# (components/policies/tenant-secrets.yaml), not this role — see the module's iam.tf.
+module "external_secrets_identity" {
+  source       = "./modules/external-secrets-identity"
   project_name = data.terraform_remote_state.foundation.outputs.project_name
   tags         = data.terraform_remote_state.foundation.outputs.tags
-  oidc         = data.terraform_remote_state.foundation.outputs.oidc
-  tenants      = var.tenant_secrets
+  cluster_name = data.terraform_remote_state.foundation.outputs.cluster_name
 }
 
 # Argo CD. Installed after the load-balancer controller, in the last layer applied —
@@ -97,6 +96,9 @@ module "argocd_bootstrap" {
   apps_source_repos      = var.apps_source_repos
   apps_namespaces        = var.apps_namespaces
 
-  # The projects and the root app are meaningless until Argo CD's CRDs exist.
-  depends_on = [module.argocd]
+  # The projects and the root app are meaningless until Argo CD's CRDs exist. The
+  # operator's Pod Identity association has to exist before Argo CD starts its pods:
+  # credentials are injected at pod creation, and a pod started earlier never gets
+  # them.
+  depends_on = [module.argocd, module.external_secrets_identity]
 }

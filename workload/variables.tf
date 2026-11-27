@@ -72,9 +72,3 @@ variable "ingress_listener_port" {
   type        = number
   description = "Port the platform ingress load balancer listens on, and the Gateway Service port it forwards to."
 }
-
-# --- Tenant secrets -----------------------------------------------------------
-variable "tenant_secrets" {
-  type        = list(string)
-  description = "Tenants with `secrets: true` in platform-gitops (tenants/registry/<name>.yaml). Each gets an IAM role that trusts only app-<name>/external-secrets and reads only apps/<name>/* in Secrets Manager."
-}
