@@ -19,7 +19,7 @@ comments (`see ARCHITECTURE.md §N`) and are stable.
 │                             └ VPC endpoints + S3 gateway │
 └──────────────────────────────────────────────────────────┘
 
-bootstrap → state bucket + OIDC roles + Spot SLR  local state
+bootstrap → state bucket + OIDC/ECR roles + Spot SLR  local state
 foundation → network, cluster, nodes, bastion  ─┐ remote_state
 workload   → add-ons, ingress ALB, Argo CD     ←┘
                     └─ handover ─▶ platform-gitops
@@ -143,6 +143,18 @@ hands the cluster to Argo CD.
 - **A default `gp3` StorageClass.** Without one the CSI driver provisions nothing, and
   EKS's built-in `gp2` uses the in-tree provisioner removed in 1.27. `Delete` reclaim
   in hml, where a retained volume outlives `destroy` and bills silently.
+- **External Secrets: one identity, isolation in admission.** A single role, bound by
+  Pod Identity to `external-secrets/external-secrets`, reads `apps/*` in Secrets
+  Manager for every application through one `ClusterSecretStore`. Admitting an
+  application is then a change in `platform-gitops`, never an apply here.
+  - **Trade-off:** IAM no longer tells applications apart. `platform-gitops`'
+    `tenant-secrets` admission policy does: `app-<name>` may name only
+    `apps/<name>/*`, and `SecretStore`/`PushSecret`/generators — which would use the
+    controller's credentials freely — are refused in application namespaces. A bug in
+    that policy is a cross-tenant read; one role per application would have kept the
+    boundary in IAM at the price of an apply per application.
+  - The association must exist before the operator's pods start (credentials are
+    injected at pod creation), so `argocd_bootstrap` depends on it.
 - **Argo CD, installed and then left alone.** Terraform installs it and stops; from
   there custom resources arrive from Git, avoiding the plan-time CRD-schema problem.
 - **The handover: two `AppProject`s and one root `Application`.** The projects are the
@@ -156,7 +168,9 @@ hands the cluster to Argo CD.
     checks that the manifests match. Renaming `project_name` would leave Karpenter
     unable to launch a node, with no diff in this repository and no failing check.
     This is the cross-repository version of exactly what
-    `scripts/check-layer-contract.sh` catches inside it.
+    `scripts/check-layer-contract.sh` catches inside it. The External Secrets
+    ServiceAccount the Pod Identity association names is a sixth, pinned on both
+    sides (`serviceAccount.name` in `platform-gitops`).
   - **Sharp edge:** Helm 3 does not upgrade CRDs. `crds.keep = true` so uninstalling
     never cascade-deletes live `Application` objects.
 
@@ -222,6 +236,13 @@ Delivered by Argo CD (waves 9 and 10), not as an AWS add-on.
   GitHub stamps `environment:<name>` only for a job declaring an Environment. **The
   Environment's branch policy is load-bearing:** without it a pull request could
   declare the Environment and mint the deploy claim itself.
+- **Application pipelines get their own roles**, also in `bootstrap` (`ecr.tf`):
+  push (from `main` of the owner's repositories, `repository/apps/*` only, no delete)
+  and read (app-gitops' CI). ECR repositories are created by the pipeline on first
+  push, outside Terraform state, so a teardown never deletes an image a values file
+  pins. Both trusts list the two `sub` formats GitHub issues — `repo:<owner>/<repo>`
+  and the immutable `repo:<owner>@<id>/<repo>@<id>` that newer repositories get; a
+  trust with only the first silently refuses every new repository.
 - **Deploys are never automatic on merge.** `workflow_dispatch`, gated on tests,
   `validate` and Trivy, applying a saved plan.
 - **The plan role holds no write permission at all**, including the state lock — hence

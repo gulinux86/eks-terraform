@@ -6,7 +6,8 @@ Terraform builds the network, the cluster and the AWS-side plumbing, then stops 
 deliberate boundary: two Argo CD `AppProject`s and one root `Application`. Everything
 above that comes from
 [`platform-gitops`](https://github.com/gulinux86/platform-gitops) — Gateway API,
-cert-manager, Istio in ambient mode, Karpenter.
+cert-manager, Istio in ambient mode, Karpenter, External Secrets, and every
+application.
 
 Design decisions and their trade-offs are in **`ARCHITECTURE.md`**. Read the relevant
 section before changing a security-shaped default. Upgrading a cluster's Kubernetes
@@ -14,9 +15,11 @@ version has its own runbook, **`UPGRADING.md`**.
 
 ```
 bootstrap/   state bucket (KMS) + OIDC roles + Spot SLR   run once per account
+             + ECR roles for application pipelines
 foundation/  VPC · EKS · KMS · system nodes · bastion    ─┐
              VPC endpoints · core add-ons · Karpenter IAM │ terraform_remote_state
 workload/    ALB controller · ingress ALB · storage      ←┘
+             External Secrets' Pod Identity role
              Argo CD + the handover
                       └──▶ platform-gitops
 ```
@@ -33,13 +36,14 @@ workload/    ALB controller · ingress ALB · storage      ←┘
 
 | Layer | Owns | State |
 |---|---|---|
-| `bootstrap` | State bucket, OIDC roles, EC2 Spot service-linked role | local, not committed |
+| `bootstrap` | State bucket, OIDC roles (Terraform plan/deploy, ECR push/read), EC2 Spot service-linked role | local, not committed |
 | `foundation` | VPC, EKS, KMS, system node group, bastion, endpoints, core add-ons, Karpenter's AWS prerequisites | `foundation/<env>/terraform.tfstate` |
-| `workload` | ALB controller, ingress ALB, StorageClass, Argo CD, the handover | `workload/<env>/terraform.tfstate` |
+| `workload` | ALB controller, ingress ALB, StorageClass, External Secrets' identity, Argo CD, the handover | `workload/<env>/terraform.tfstate` |
 
 Everything above the handover arrives from `platform-gitops`: Gateway API,
-cert-manager, Istio ambient, Karpenter, and the metrics stack (Prometheus, Grafana,
-Kiali).
+cert-manager, Istio ambient, Karpenter, External Secrets, the metrics stack
+(Prometheus, Grafana, Kiali), and the applications admitted in its `tenants/`.
+Admitting an application needs nothing from this repository.
 
 `workload` reads `foundation` outputs, so **`foundation` applies first**.
 `foundation/outputs.tf` is that contract — `scripts/check-layer-contract.sh` guards it
@@ -175,17 +179,23 @@ only) is what stops a branch minting it for itself. See §9.
 
 Secrets per account: `<ENV>_PLAN_ROLE_ARN`, `<ENV>_DEPLOY_ROLE_ARN`.
 
+`bootstrap` also holds the roles application pipelines use (`ecr.tf`):
+`github-actions-ecr-push` for ci-templates' `service-release` (from `main` only,
+`apps/*` only) and `github-actions-ecr-read` for app-gitops' CI. Their ARNs go in each
+application repository (`ECR_PUSH_ROLE_ARN`) and in app-gitops (`ECR_READ_ROLE_ARN`).
+
 ## Layout
 
 ```
-bootstrap/     state bucket + OIDC roles + Spot service-linked role
+bootstrap/     state bucket + OIDC roles + ECR roles + Spot service-linked role
 foundation/    main.tf outputs.tf variables.tf backend.tf provider.tf
                environments/{hml,prod}/{terraform.tfvars,backend.hcl}
                modules/{network,cluster,managed-node-group,bastion,
                         vpc-endpoints,eks-addons,karpenter}/
 workload/      same shape
                modules/{aws-load-balancer-controller,platform-ingress,
-                        storage,argocd,argocd-bootstrap}/
+                        storage,external-secrets-identity,argocd,
+                        argocd-bootstrap}/
 scripts/       check-layer-contract.sh · eks-upgrade.sh
 .github/       plan · test · security-scan · docs · lint · deploy · destroy ·
                eks-upgrade-pr · eks-upgrade
