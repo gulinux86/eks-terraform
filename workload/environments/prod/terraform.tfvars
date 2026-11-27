@@ -62,6 +62,11 @@ platform_source_repos = [
   # anything that names the chart.
   "https://prometheus-community.github.io/helm-charts",
   "https://kiali.org/helm-charts",
+
+  # External Secrets Operator (platform-gitops apps/01-external-secrets.yaml). The
+  # operator holds no AWS permissions of its own; what each namespace may read is
+  # decided by a per-application IAM role, not by this entry.
+  "https://charts.external-secrets.io",
 ]
 
 apps_source_repos = ["https://github.com/gulinux86/app-gitops"]
