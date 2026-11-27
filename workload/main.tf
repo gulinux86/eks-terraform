@@ -46,6 +46,21 @@ module "platform_ingress" {
   depends_on = [module.eks_aws_load_balancer_controller]
 }
 
+# One IAM role per tenant that reads secrets, for the External Secrets Operator.
+#
+# The operator in platform-gitops has no AWS identity; each tenant's SecretStore
+# assumes its own role here, which trusts only that namespace's ServiceAccount and
+# reads only that application's prefix. The list mirrors the tenants with
+# `secrets: true` in platform-gitops' tenants/registry/ — a tenant there without a
+# role here has a SecretStore that never becomes Ready.
+module "tenant_secrets" {
+  source       = "./modules/tenant-secrets"
+  project_name = data.terraform_remote_state.foundation.outputs.project_name
+  tags         = data.terraform_remote_state.foundation.outputs.tags
+  oidc         = data.terraform_remote_state.foundation.outputs.oidc
+  tenants      = var.tenant_secrets
+}
+
 # Argo CD. Installed after the load-balancer controller, in the last layer applied —
 # so it lands on a cluster that already has its network, nodes and controllers.
 #

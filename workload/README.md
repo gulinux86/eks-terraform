@@ -61,6 +61,7 @@ group registers nothing and the load balancer answers 503. See
 | <a name="module_eks_aws_load_balancer_controller"></a> [eks\_aws\_load\_balancer\_controller](#module\_eks\_aws\_load\_balancer\_controller) | ./modules/aws-load-balancer-controller | n/a |
 | <a name="module_platform_ingress"></a> [platform\_ingress](#module\_platform\_ingress) | ./modules/platform-ingress | n/a |
 | <a name="module_storage"></a> [storage](#module\_storage) | ./modules/storage | n/a |
+| <a name="module_tenant_secrets"></a> [tenant\_secrets](#module\_tenant\_secrets) | ./modules/tenant-secrets | n/a |
 
 ## Resources
 
@@ -86,6 +87,7 @@ group registers nothing and the load balancer answers 503. See
 | <a name="input_platform_source_repos"></a> [platform\_source\_repos](#input\_platform\_source\_repos) | Repositories the platform project may source from, chart repositories included. Enumerated rather than "*" so a component cannot be installed from an arbitrary registry. | `list(string)` | n/a | yes |
 | <a name="input_region"></a> [region](#input\_region) | AWS region (must match the foundation layer region) | `string` | n/a | yes |
 | <a name="input_storage_reclaim_policy"></a> [storage\_reclaim\_policy](#input\_storage\_reclaim\_policy) | Reclaim policy for the default StorageClass. Retain protects data; Delete prevents orphaned volumes accruing cost in an environment that is rebuilt often. | `string` | n/a | yes |
+| <a name="input_tenant_secrets"></a> [tenant\_secrets](#input\_tenant\_secrets) | Tenants with `secrets: true` in platform-gitops (tenants/registry/<name>.yaml). Each gets an IAM role that trusts only app-<name>/external-secrets and reads only apps/<name>/* in Secrets Manager. | `list(string)` | n/a | yes |
 
 ## Outputs
 
