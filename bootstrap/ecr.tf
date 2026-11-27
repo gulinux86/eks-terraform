@@ -9,6 +9,13 @@
 #
 # Every repository lives under apps/ — apps/<app> or apps/<app>/<service> — and both
 # roles are confined to that prefix.
+#
+# Subjects come in two shapes. GitHub issues repositories created since its switch to
+# immutable subjects a `sub` carrying numeric IDs —
+# repo:<owner>@<owner id>/<repo>@<repo id>:... — and older ones the plain
+# repo:<owner>/<repo>:... form. Both are trusted here, each pinned to the owner. The
+# immutable form is the stronger one: a repository deleted and recreated under the
+# same name gets a new ID, and does not inherit the trust.
 # ---------------------------------------------------------------------------
 
 data "aws_caller_identity" "current" {}
@@ -39,7 +46,7 @@ data "aws_iam_policy_document" "ecr_push_trust" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = [for repo in var.ecr_push_repositories : "repo:${repo}:ref:refs/heads/main"]
+      values   = [for prefix in var.ecr_push_subject_prefixes : "${prefix}:ref:refs/heads/main"]
     }
   }
 }
@@ -119,10 +126,10 @@ data "aws_iam_policy_document" "ecr_read_trust" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        "repo:${var.gitops_repository}:pull_request",
-        "repo:${var.gitops_repository}:ref:refs/heads/*",
-      ]
+      values = flatten([for prefix in var.gitops_subject_prefixes : [
+        "${prefix}:pull_request",
+        "${prefix}:ref:refs/heads/*",
+      ]])
     }
   }
 }

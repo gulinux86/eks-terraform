@@ -60,10 +60,13 @@ variable "tags" {
   }
 }
 
-variable "ecr_push_repositories" {
+variable "ecr_push_subject_prefixes" {
   type        = list(string)
-  description = "Repositories whose default-branch release workflow may push images to apps/* in ECR, as owner/name. A trailing * matches every repository of the owner. Pull requests never get the push role."
-  default     = ["gulinux86/*"]
+  description = "OIDC subject prefixes (everything before `:ref:`) of the repositories whose main-branch release workflow may push images to apps/* in ECR. Both GitHub subject formats: repo:<owner>/<repo> and the immutable repo:<owner>@<owner id>/<repo>@<repo id>; * matches any repository. Pull requests never get the push role."
+  default = [
+    "repo:gulinux86/*",
+    "repo:gulinux86@37779157/*",
+  ]
 }
 
 variable "ecr_push_role_name" {
@@ -72,10 +75,13 @@ variable "ecr_push_role_name" {
   default     = "github-actions-ecr-push"
 }
 
-variable "gitops_repository" {
-  type        = string
-  description = "The application GitOps repository, as owner/name. Its CI reads the images its values files pin."
-  default     = "gulinux86/app-gitops"
+variable "gitops_subject_prefixes" {
+  type        = list(string)
+  description = "OIDC subject prefixes of the application GitOps repository, in both GitHub subject formats. Its CI reads the images its values files pin, on pull requests and branch pushes."
+  default = [
+    "repo:gulinux86/app-gitops",
+    "repo:gulinux86@37779157/app-gitops@1430119042",
+  ]
 }
 
 variable "ecr_read_role_name" {
