@@ -89,9 +89,3 @@ gateway_service_name = "platform-gateway-istio"
 # The Gateway's HTTP listener. Plain HTTP while the load balancer is internal;
 # TLS terminates here when the external path lands.
 ingress_listener_port = 80
-
-# --- Tenant secrets -----------------------------------------------------------
-# One IAM role per tenant with `secrets: true` in platform-gitops'
-# tenants/registry/. Adding an application that reads secrets is an entry here and
-# its registry file there; the SecretStore stays not Ready until both exist.
-tenant_secrets = ["sim"]
